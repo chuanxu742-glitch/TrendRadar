@@ -1,0 +1,19 @@
+id: gptmail-otp
+version: 1
+scope: project
+name: GPTMail 临时邮箱与验证码
+entrypoint: monitor.skills.gptmail_otp.client:GPTMailClient
+key_refresh_entrypoint: monitor.skills.gptmail_otp.provider:main
+triggers:
+  - 临时邮箱
+  - 邮箱验证码
+  - OTP
+permissions:
+  network:
+    - https://mail.chatgpt.org.uk
+  state_write:
+    - ${MONITOR_STATE_DIR:-/app/state}/gptmail/public-key.json
+safety:
+  authorized_accounts_only: true
+  destructive_mail_operations_default: false
+  redact_api_key: true

@@ -14,11 +14,16 @@ dependencies = [
     "litellm==1.82.6",
     "json-repair==0.58.6",
     "tenacity==8.5.0",
+    "PyExecJS==1.5.1",
+    "loguru==0.7.3",
+    "python-dotenv==1.1.1",
+    "qrcode==8.2",
 ]
 
 [project.scripts]
 trendradar = "trendradar.__main__:main"
 trendradar-mcp = "mcp_server.server:run_server"
+trendradar-xhs-login = "trendradar.crawler.xiaohongshu_login:main"
 
 [dependency-groups]
 dev = []

@@ -102,6 +102,29 @@ platforms:
       expected_domain: "zhihu.com"
 
 
+# ===============================================================
+# 2.5 Data Source - Xiaohongshu fixed-keyword search
+#
+# Uses an unofficial web API and fetches only the first search-result page.
+# Use the Spider_XHS QR login command to generate cookie_file.
+# ===============================================================
+xiaohongshu:
+  enabled: false
+  cookie_file: "config/xhs_cookie.txt"
+  limit_per_keyword: 20
+  sort: "latest"                      # general/latest/popular/comments/collects
+  note_type: "all"                    # all/video/image
+  note_time: "day"                    # all/day/week/half_year
+  timeout: 15
+  request_interval_seconds:
+    min: 15
+    max: 30
+  keywords:
+    - id: "example"
+      query: "artificial intelligence"
+      name: "Xiaohongshu · AI"
+
+
 
 # ===============================================================
 # 3. Data Source - RSS feeds

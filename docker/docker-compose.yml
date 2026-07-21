@@ -1,8 +1,105 @@
 services:
+  official-monitor:
+    build:
+      context: ../monitor
+      dockerfile: Dockerfile
+    image: trendradar-official-monitor:scrapling-0.4.10
+    container_name: trendradar-official-monitor
+    restart: unless-stopped
+
+    entrypoint: ["python", "/app/monitor/official_monitor.py"]
+
+    ports:
+      - "127.0.0.1:8090:8090"
+
+    volumes:
+      - ../monitor:/app/monitor:ro
+      - ../config:/app/config:ro
+      - ../output/official-monitor:/app/state
+
+    environment:
+      - TZ=Asia/Shanghai
+      - MONITOR_INTERVAL=${MONITOR_INTERVAL:-900}
+      - MONITOR_BATCH_SIZE=${MONITOR_BATCH_SIZE:-75}
+      - MONITOR_SCAN_CONCURRENCY=${MONITOR_SCAN_CONCURRENCY:-8}
+      - MONITOR_SCAN_DYNAMIC_CONCURRENCY=${MONITOR_SCAN_DYNAMIC_CONCURRENCY:-2}
+      - MONITOR_SCAN_STEALTH_CONCURRENCY=${MONITOR_SCAN_STEALTH_CONCURRENCY:-1}
+      - MONITOR_REQUEST_TIMEOUT=${MONITOR_REQUEST_TIMEOUT:-15}
+      - MONITOR_DYNAMIC_FETCH_LIMIT=${MONITOR_DYNAMIC_FETCH_LIMIT:-5}
+      - MONITOR_STEALTH_FETCH_LIMIT=${MONITOR_STEALTH_FETCH_LIMIT:-2}
+      - MONITOR_BROWSER_HARD_TIMEOUT=${MONITOR_BROWSER_HARD_TIMEOUT:-75}
+      - MONITOR_CLOUDFLARE_SOLVER_ENABLED=${MONITOR_CLOUDFLARE_SOLVER_ENABLED:-true}
+      - MONITOR_CLOUDFLARE_TIMEOUT=${MONITOR_CLOUDFLARE_TIMEOUT:-60}
+      - MONITOR_AGENT_MAX_ATTEMPTS=${MONITOR_AGENT_MAX_ATTEMPTS:-3}
+      - MONITOR_AGENT_MAX_DURATION=${MONITOR_AGENT_MAX_DURATION:-180}
+      - MONITOR_CHECKPOINT_EVERY=${MONITOR_CHECKPOINT_EVERY:-10}
+      - MONITOR_FAILURE_RETRY_INTERVAL=${MONITOR_FAILURE_RETRY_INTERVAL:-30}
+      - MONITOR_CRITICAL_CHECK_INTERVAL=${MONITOR_CRITICAL_CHECK_INTERVAL:-21600}
+      - MONITOR_POLICY_CHECK_INTERVAL=${MONITOR_POLICY_CHECK_INTERVAL:-86400}
+      - MONITOR_REFERENCE_CHECK_INTERVAL=${MONITOR_REFERENCE_CHECK_INTERVAL:-604800}
+      - MONITOR_FAILURE_BACKOFF_BASE=${MONITOR_FAILURE_BACKOFF_BASE:-21600}
+      - MONITOR_FAILURE_BACKOFF_MAX=${MONITOR_FAILURE_BACKOFF_MAX:-604800}
+      - MONITOR_HEALTH_MAX_STALE_SECONDS=${MONITOR_HEALTH_MAX_STALE_SECONDS:-1800}
+      - MONITOR_INVENTORY=/app/state/knowledge_sources.json
+      - MONITOR_PORT=8090
+      - MONITOR_AI_SUMMARY_ENABLED=${MONITOR_AI_SUMMARY_ENABLED:-true}
+      - MONITOR_AI_SUMMARY_BATCH_SIZE=${MONITOR_AI_SUMMARY_BATCH_SIZE:-20}
+      - MONITOR_AI_SUMMARY_CONCURRENCY=${MONITOR_AI_SUMMARY_CONCURRENCY:-4}
+      - MONITOR_AI_SUMMARY_INTERVAL=${MONITOR_AI_SUMMARY_INTERVAL:-5}
+      - MONITOR_AI_SUMMARY_REQUEST_TIMEOUT=${MONITOR_AI_SUMMARY_REQUEST_TIMEOUT:-90}
+      - MONITOR_AI_SUMMARY_HARD_TIMEOUT=${MONITOR_AI_SUMMARY_HARD_TIMEOUT:-120}
+      - MONITOR_AI_SUMMARY_RETRIES=${MONITOR_AI_SUMMARY_RETRIES:-0}
+      - MONITOR_SITE_DISCOVERY_ENABLED=${MONITOR_SITE_DISCOVERY_ENABLED:-true}
+      - MONITOR_SITE_DISCOVERY_SITES_PER_CYCLE=${MONITOR_SITE_DISCOVERY_SITES_PER_CYCLE:-40}
+      - MONITOR_SITE_DISCOVERY_CONCURRENCY=${MONITOR_SITE_DISCOVERY_CONCURRENCY:-4}
+      - MONITOR_SITE_DISCOVERY_CYCLE_INTERVAL=${MONITOR_SITE_DISCOVERY_CYCLE_INTERVAL:-30}
+      - MONITOR_SITE_DISCOVERY_CIRCUIT_SECONDS=${MONITOR_SITE_DISCOVERY_CIRCUIT_SECONDS:-21600}
+      - MONITOR_SITE_DISCOVERY_INTERVAL=${MONITOR_SITE_DISCOVERY_INTERVAL:-86400}
+      - MONITOR_SITE_DISCOVERY_MAX_SITEMAPS=${MONITOR_SITE_DISCOVERY_MAX_SITEMAPS:-12}
+      - MONITOR_SITE_DISCOVERY_MAX_URLS=${MONITOR_SITE_DISCOVERY_MAX_URLS:-150}
+      - MONITOR_SITE_DISCOVERY_MAX_PAGES=${MONITOR_SITE_DISCOVERY_MAX_PAGES:-6}
+      - MONITOR_SITE_DISCOVERY_MAX_DEPTH=${MONITOR_SITE_DISCOVERY_MAX_DEPTH:-2}
+      - MONITOR_KATANA_ENABLED=${MONITOR_KATANA_ENABLED:-true}
+      - MONITOR_KATANA_PATH=/usr/local/bin/katana
+      - MONITOR_KATANA_DEPTH=${MONITOR_KATANA_DEPTH:-3}
+      - MONITOR_KATANA_MAX_PAGES=${MONITOR_KATANA_MAX_PAGES:-150}
+      - MONITOR_KATANA_CRAWL_DURATION=${MONITOR_KATANA_CRAWL_DURATION:-30}
+      - MONITOR_KATANA_PROCESS_TIMEOUT=${MONITOR_KATANA_PROCESS_TIMEOUT:-45}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-deepseek/deepseek-v4-flash}
+      - AI_API_BASE=${AI_API_BASE:-}
+
+    healthcheck:
+      test: ["CMD", "python", "/app/monitor/healthcheck.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  gptmail-key-refresh:
+    image: trendradar-official-monitor:scrapling-0.4.10
+    container_name: trendradar-gptmail-key-refresh
+    restart: unless-stopped
+    depends_on:
+      - official-monitor
+    entrypoint: ["python", "-m", "monitor.skills.gptmail_otp.provider", "watch"]
+    volumes:
+      - ../monitor:/app/monitor:ro
+      - ../output/official-monitor:/app/state
+    environment:
+      - TZ=Asia/Shanghai
+      - MONITOR_STATE_DIR=/app/state
+
   trendradar:
-    image: wantcat/trendradar:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: trendradar:local-spider-xhs
     container_name: trendradar
     restart: unless-stopped
+
+    depends_on:
+      - official-monitor
 
     ports:
       - "127.0.0.1:${WEBSERVER_PORT:-8080}:${WEBSERVER_PORT:-8080}"
@@ -44,6 +141,11 @@ services:
       - AI_API_KEY=${AI_API_KEY:-}
       - AI_MODEL=${AI_MODEL:-}
       - AI_API_BASE=${AI_API_BASE:-}
+      # 小红书固定关键词数据源（Cookie 仅通过环境变量传入）
+      - XHS_ENABLED=${XHS_ENABLED:-}
+      - XHS_COOKIE=${XHS_COOKIE:-}
+      - XHS_COOKIE_FILE=${XHS_COOKIE_FILE:-config/xhs_cookie.txt}
+      - XHS_PROXY_URL=${XHS_PROXY_URL:-}
       # 远程存储配置（S3 兼容协议）
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-}

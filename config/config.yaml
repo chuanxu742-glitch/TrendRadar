@@ -99,6 +99,45 @@ platforms:
     - id: "zhihu"
       name: "知乎"
       expected_domain: "zhihu.com"
+    - id: "tencent-hot"
+      name: "腾讯新闻"
+      expected_domain: "qq.com"
+    - id: "wallstreetcn-news"
+      name: "华尔街见闻最新"
+      expected_domain: "wallstreetcn.com"
+    - id: "cankaoxiaoxi"
+      name: "参考消息"
+      expected_domain: "ckxx.net"
+    - id: "zaobao"
+      name: "联合早报"
+      expected_domain: "zaochenbao.com"
+
+
+# ===============================================================
+# 2.5 数据源 - 小红书固定关键词
+#
+# 使用非官方网页接口，仅抓搜索结果第一页，不抓详情、评论或执行互动。
+# 使用 Spider_XHS 二维码登录生成 cookie_file，禁止将 Cookie 写入本文件。
+# 开启前请使用独立非重要账号，并了解账号限制和接口变更风险。
+# ===============================================================
+xiaohongshu:
+  enabled: false
+  cookie_file: "config/xhs_cookie.txt"
+  limit_per_keyword: 20               # 单个关键词最多 20 条（仅第一页）
+  sort: "latest"                      # general/latest/popular/comments/collects
+  note_type: "all"                    # all/video/image
+  note_time: "day"                    # all/day/week/half_year
+  timeout: 15
+  request_interval_seconds:
+    min: 15
+    max: 30
+  keywords:
+    - id: "service-dog-cabin-refused"
+      query: "服务犬进客舱被拒载"
+      name: "小红书·服务犬进客舱被拒载"
+    - id: "pet-cabin-refused"
+      query: "宠物进客舱被拒载"
+      name: "小红书·宠物进客舱被拒载"
 
 
 
@@ -130,6 +169,7 @@ rss:
     - id: "hacker-news"
       name: "Hacker News"
       url: "https://hnrss.org/frontpage"
+      enabled: false
 
     - id: "ruanyifeng"
       name: "阮一峰的网络日志"
@@ -140,6 +180,27 @@ rss:
     - id: "yahoo-finance"
       name: "雅虎财经"
       url: "https://finance.yahoo.com/news/rssindex"
+      enabled: false
+
+    - id: "pet-transport-news"
+      name: "宠物托运行业新闻"
+      url: "https://news.google.com/rss/search?q=%28%22%E5%AE%A0%E7%89%A9%E6%89%98%E8%BF%90%22%20OR%20%22%E5%AE%A0%E7%89%A9%E8%BF%90%E8%BE%93%22%20OR%20%22%E6%B4%BB%E4%BD%93%E5%8A%A8%E7%89%A9%E8%BF%90%E8%BE%93%22%20OR%20%22%E5%AE%A0%E7%89%A9%E8%BF%9B%E5%AE%A2%E8%88%B1%22%29&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      max_age_days: 7
+
+    - id: "pet-transport-risk"
+      name: "宠物托运事故投诉"
+      url: "https://news.google.com/rss/search?q=%28%22%E5%AE%A0%E7%89%A9%E6%89%98%E8%BF%90%22%20OR%20%22%E5%AE%A0%E7%89%A9%E8%BF%90%E8%BE%93%22%29%20%28%E6%AD%BB%E4%BA%A1%20OR%20%E5%8F%97%E4%BC%A4%20OR%20%E4%B8%A2%E5%A4%B1%20OR%20%E6%8A%95%E8%AF%89%20OR%20%E6%8B%92%E8%BD%BD%29&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      max_age_days: 30
+
+    - id: "pet-transport-policy"
+      name: "宠物运输政策"
+      url: "https://news.google.com/rss/search?q=%28%22%E5%AE%A0%E7%89%A9%E6%89%98%E8%BF%90%22%20OR%20%22%E6%B4%BB%E4%BD%93%E5%8A%A8%E7%89%A9%E8%BF%90%E8%BE%93%22%29%20%28%E6%A3%80%E7%96%AB%20OR%20%E6%B0%91%E8%88%AA%20OR%20%E9%AB%98%E9%93%81%20OR%20%E6%B5%B7%E5%85%B3%20OR%20%E6%94%BF%E7%AD%96%29&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      max_age_days: 30
+
+    - id: "official-source-changes"
+      name: "宠物托运官网变更"
+      url: "http://official-monitor:8090/feed.xml"
+      max_age_days: 30
 
     # 自定义源示例
     # - id: "custom-feed"
@@ -153,7 +214,7 @@ rss:
 # 4. 报告模式
 # ===============================================================
 report:
-  mode: "current"                     # 报告模式（开启 schedule 后作为默认值，会被 timeline 时段覆盖）
+  mode: "incremental"                 # 报告模式（开启 schedule 后作为默认值，会被 timeline 时段覆盖）
                                       # daily = 当日汇总，按时推送当天所有匹配新闻（会包含之前推过的）
                                       # current = 当前榜单，按时推送当前在榜的匹配新闻（持续在榜的每次都出现）
                                       # incremental = 增量监控，只推送新增内容，零重复（没有新增时不推送）
@@ -175,7 +236,7 @@ report:
 # 4.5 筛选策略
 # ===============================================================
 filter:
-  method: "keyword"                     # 筛选方式（二选一）
+  method: "ai"                          # 筛选方式（二选一）
                                        # keyword = 关键词匹配，不调用 AI，不消耗 token，但规则固定
                                        #           词组定义在 config/frequency_words.txt
                                        # ai = AI 智能分类，更灵活但每次运行消耗 token
@@ -198,7 +259,7 @@ ai_filter:
 
   # 兴趣描述文件（默认 config/ai_interests.txt，无需配置）
   # 自定义文件放入 config/custom/ai/ 目录，然后指定文件名：
-  # interests_file: "finance.txt"    # → 加载 config/custom/ai/finance.txt
+  interests_file: "pet_transport.txt" # → 加载 config/custom/ai/pet_transport.txt
 
   reclassify_threshold: 0.6              # 全量重分类触发阈值（0~1）
                                           # 越低越倾向全量重分类（更准但更耗 token）
@@ -424,7 +485,7 @@ ai_analysis:
   max_news_for_analysis: 150        # 参与分析的新闻数量上限（控制 token 成本的关键项）
                                     # 热榜优先占用配额，RSS 用剩余配额，独立展示区不受此限制
 
-  include_rss: false                # 是否包含 RSS 内容进行分析（true=包含, false=不包含）
+  include_rss: true                 # 是否包含 RSS 内容进行分析（true=包含, false=不包含）
   include_standalone: true          # 是否纳入独立展示区数据（true=纳入, false=不纳入）
 
   include_rank_timeline: true       # 排名时间线详细程度

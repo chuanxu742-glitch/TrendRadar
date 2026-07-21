@@ -1,0 +1,104 @@
+sources:
+  - id: caac-live-animal-guide
+    name: 中国民航局活体动物航空运输工作指南
+    category: 中国监管
+    url: https://www.caac.gov.cn/PHONE/XWZX/MHYW/202310/t20231013_221705.html
+    keywords: [活体动物, 托运人, 承运人, 运输容器, 检疫]
+    required_terms: [活体动物]
+    min_content_bytes: 500
+    knowledge_base_ref: procedures/countries/china.md
+
+  - id: railway-pet-transport
+    name: 中国铁路12306宠物运输动态
+    category: 铁路政策
+    url: https://www.12306.cn/mormhweb/zxdt/index_zxdt_1.html
+    keywords: [宠物, 动物, 托运, 运输]
+    required_terms: [宠物]
+    min_content_bytes: 100
+
+  - id: csair-pet
+    name: 中国南方航空宠物产品须知
+    category: 中国航司
+    url: https://www.csair.com/newh5/cn/tourguide/booking/orders/product/petxz/index.shtml
+    keywords: [宠物, 小动物, 托运, 客舱, 检疫, 航空箱]
+    required_terms: [宠物]
+    min_content_bytes: 500
+    knowledge_base_ref: airlines/china-southern.md
+
+  - id: hainan-pet
+    name: 海南航空宠物运输政策
+    category: 中国航司
+    url: https://www.hainanairlines.com/HUPortal/dyn/portal/DisplayPage?LANGUAGE=US&COUNTRY_SITE=US&SITE=CBHZCBHZ&PAGE=TWAM
+    keywords: [pet, animal, cabin, checked, kennel, 宠物, 小动物]
+    required_terms: [pet, animal]
+    min_content_bytes: 500
+    knowledge_base_ref: airlines/hainan-airlines.md
+
+  - id: xiamenair-live-animal
+    name: 厦门航空活体动物运输政策
+    category: 中国航司
+    url: https://www.xiamenair.com/en-us/article-detail?articleLink=/cms-i18n-ow/cms-en-us/contents/44542.json
+    keywords: [live animal, pet, animal, cargo, container]
+    required_terms: [animal]
+    min_content_bytes: 500
+    knowledge_base_ref: airlines/xiamenair.md
+
+  - id: shenzhenair-special-baggage
+    name: 深圳航空特殊行李与小动物政策
+    category: 中国航司
+    url: https://globalpage.shenzhenair.com/zhair/cms/static/pages/wcm/static-navigation/Itinerary/BaggageServices/SpecialBaggage/SpecialBaggage_en?language_id=102
+    keywords: [pet, animal, baggage, container, quarantine]
+    required_terms: [animal, pet]
+    min_content_bytes: 500
+    knowledge_base_ref: airlines/shenzhen-airlines.md
+
+  - id: ipata-industry
+    name: IPATA 国际宠物运输协会
+    category: 国际行业协会
+    url: https://www.ipata.org/
+    keywords: [pet shipping, pet transport, airline, regulation, news]
+    required_terms: [pet shipping, pet transport]
+    min_content_bytes: 1000
+    knowledge_base_ref: members.json
+
+  - id: iata-live-animals
+    name: IATA 活体动物运输规则
+    category: 国际行业标准
+    url: https://www.iata.org/en/programs/cargo/live-animals/
+    keywords: [live animals, LAR, animal transport, container, airline]
+    required_terms: [live animals]
+    min_content_bytes: 500
+
+  - id: usda-pet-travel
+    name: USDA APHIS 宠物旅行规则
+    category: 重点目的地政策
+    url: https://www.aphis.usda.gov/pet-travel
+    keywords: [pet travel, dog, cat, import, export, health certificate]
+    required_terms: [pet travel]
+    min_content_bytes: 500
+    knowledge_base_ref: procedures/countries/usa-united-states.md
+
+  - id: eu-pet-legislation
+    name: 欧盟宠物移动法规
+    category: 重点目的地政策
+    url: https://europa.eu/youreurope/citizens/travel/carry/pets-and-other-animals/index_en.htm
+    keywords: [pets, dogs, cats, ferrets, movement, microchip, vaccination]
+    required_terms: [pets, dogs, cats]
+    min_content_bytes: 500
+    knowledge_base_ref: procedures/countries/european-union.md
+
+  # 国航现行页面会对普通 HTTP 客户端返回 403，暂用新闻 RSS 监控，避免把拦截页误判为政策变更。
+  - id: airchina-pet
+    name: 中国国际航空小动物运输
+    category: 中国航司
+    url: https://webresource.airchina.com.cn/zh-CN/content/service/special_traveller/avih/
+    enabled: false
+    knowledge_base_ref: airlines/air-china.md
+
+  # 东航页面当前返回空壳 HTML，暂不启用内容哈希监控。
+  - id: ceair-pet
+    name: 中国东方航空小动物运输
+    category: 中国航司
+    url: https://www.ceair.com/global/en_static/Announcement/TravelTips/SpecialPassengerServiceNotice/LittleAnimal/
+    enabled: false
+    knowledge_base_ref: airlines/china-eastern.md

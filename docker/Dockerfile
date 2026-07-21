@@ -53,6 +53,16 @@ RUN set -ex && \
 # 从官方镜像拷贝 uv 二进制
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+# Spider_XHS 官方签名脚本要求 Node.js 20
+COPY --from=node:20-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:20-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# 安装 Spider_XHS 原生 JS 签名依赖
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
 # 先安装依赖（利用 Docker 层缓存）
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \

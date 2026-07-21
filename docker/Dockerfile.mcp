@@ -2,11 +2,19 @@ FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
+# Spider_XHS 的 PC 签名模块依赖 Node.js 运行上游 JavaScript。
+COPY --from=node:20-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:20-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
 # 从官方镜像拷贝 uv 二进制
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # 先安装依赖（利用 Docker 层缓存）
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 

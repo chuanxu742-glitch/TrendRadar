@@ -4,5 +4,17 @@
 """
 
 from trendradar.crawler.fetcher import DataFetcher
+from trendradar.crawler.xiaohongshu import (
+    XiaohongshuError,
+    XiaohongshuFetcher,
+    XiaohongshuRiskControlError,
+    XiaohongshuSessionError,
+)
 
-__all__ = ["DataFetcher"]
+__all__ = [
+    "DataFetcher",
+    "XiaohongshuError",
+    "XiaohongshuFetcher",
+    "XiaohongshuRiskControlError",
+    "XiaohongshuSessionError",
+]

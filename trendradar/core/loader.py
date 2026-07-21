@@ -66,6 +66,35 @@ def _load_crawler_config(config_data: Dict) -> Dict:
     }
 
 
+def _load_xiaohongshu_config(config_data: Dict) -> Dict:
+    """加载小红书固定关键词数据源配置。"""
+    source = config_data.get("xiaohongshu", {})
+    enabled_env = _get_env_bool("XHS_ENABLED")
+    interval = source.get("request_interval_seconds", {})
+    cookie_file = _get_env_str("XHS_COOKIE_FILE") or source.get(
+        "cookie_file", "config/xhs_cookie.txt"
+    )
+    cookie = _get_env_str("XHS_COOKIE")
+    if not cookie and cookie_file:
+        cookie_path = Path(cookie_file)
+        if cookie_path.is_file():
+            cookie = cookie_path.read_text(encoding="utf-8").strip()
+    return {
+        "ENABLED": enabled_env if enabled_env is not None else source.get("enabled", False),
+        "COOKIE": cookie,
+        "COOKIE_FILE": cookie_file,
+        "KEYWORDS": source.get("keywords", []),
+        "LIMIT_PER_KEYWORD": source.get("limit_per_keyword", 20),
+        "SORT": source.get("sort", "latest"),
+        "NOTE_TYPE": source.get("note_type", "all"),
+        "NOTE_TIME": source.get("note_time", "day"),
+        "INTERVAL_MIN_SECONDS": interval.get("min", 15),
+        "INTERVAL_MAX_SECONDS": interval.get("max", 30),
+        "TIMEOUT": source.get("timeout", 15),
+        "PROXY_URL": _get_env_str("XHS_PROXY_URL") or source.get("proxy_url", ""),
+    }
+
+
 def _load_report_config(config_data: Dict) -> Dict:
     """加载报告配置"""
     report_config = config_data.get("report", {})
@@ -575,6 +604,9 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
     # RSS 配置
     config["RSS"] = _load_rss_config(config_data)
+
+    # 小红书固定关键词数据源
+    config["XIAOHONGSHU"] = _load_xiaohongshu_config(config_data)
 
     # AI 模型共享配置
     config["AI"] = _load_ai_config(config_data)

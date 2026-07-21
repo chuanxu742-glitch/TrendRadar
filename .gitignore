@@ -1,0 +1,14 @@
+# Local authentication material
+config/xhs_cookie.txt
+
+# Runtime caches
+**/__pycache__/
+*.py[cod]
+node_modules/
+
+# Generated reports, databases, monitor state and snapshots
+output/
+
+# Local crawler artifacts and runtime key state
+.tmp/
+output/official-monitor/gptmail/

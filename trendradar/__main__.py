@@ -16,7 +16,7 @@ from trendradar.context import AppContext
 from trendradar import __version__
 from trendradar.core import load_config
 from trendradar.core.analyzer import convert_keyword_stats_to_platform_stats
-from trendradar.crawler import DataFetcher
+from trendradar.crawler import DataFetcher, XiaohongshuFetcher
 from trendradar.storage import convert_crawl_results_to_news_data
 from trendradar.utils.time import DEFAULT_TIMEZONE, is_within_days, calculate_days_old
 from trendradar.ai import AIAnalyzer, AIAnalysisResult
@@ -79,6 +79,10 @@ class NewsAnalyzer:
             self.proxy_url,
             api_url=self.ctx.config.get("PLATFORMS_API_URL") or None,
         )
+        self.xiaohongshu_fetcher = None
+        xhs_config = self.ctx.config.get("XIAOHONGSHU", {})
+        if xhs_config.get("ENABLED", False):
+            self.xiaohongshu_fetcher = XiaohongshuFetcher.from_config(xhs_config)
 
         # RSS/平台元数据（用于报告头部展示）
         self._rss_source_total = 0
@@ -927,8 +931,11 @@ class NewsAnalyzer:
         now = self.ctx.get_time()
         print(f"当前北京时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
-        if not self.ctx.config["ENABLE_CRAWLER"]:
-            print("爬虫功能已禁用（ENABLE_CRAWLER=False），程序退出")
+        hotlist_enabled = self.ctx.config["ENABLE_CRAWLER"]
+        xhs_enabled = self.ctx.config.get("XIAOHONGSHU", {}).get("ENABLED", False)
+        rss_enabled = self.ctx.config.get("RSS", {}).get("ENABLED", False)
+        if not any((hotlist_enabled, xhs_enabled, rss_enabled)):
+            print("所有数据源均已禁用，程序退出")
             return False
 
         has_notification = self._has_notification_configured()
@@ -946,26 +953,35 @@ class NewsAnalyzer:
 
     def _crawl_data(self) -> Tuple[Dict, Dict, List]:
         """执行数据爬取"""
-        ids = []
-        domain_rules = {}
-        for platform in self.ctx.platforms:
-            if "name" in platform:
-                ids.append((platform["id"], platform["name"]))
-            else:
-                ids.append(platform["id"])
-            expected_domain = platform.get("expected_domain", "")
-            if expected_domain:
-                domain_rules[platform["id"]] = expected_domain
-
-        print(
-            f"配置的监控平台: {[p.get('name', p['id']) for p in self.ctx.platforms]}"
-        )
-        print(f"开始爬取数据，请求间隔 {self.request_interval} 毫秒")
         Path("output").mkdir(parents=True, exist_ok=True)
+        results, id_to_name, failed_ids = {}, {}, []
 
-        results, id_to_name, failed_ids = self.data_fetcher.crawl_websites(
-            ids, self.request_interval, domain_rules=domain_rules
-        )
+        if self.ctx.config["ENABLE_CRAWLER"]:
+            ids = []
+            domain_rules = {}
+            for platform in self.ctx.platforms:
+                if "name" in platform:
+                    ids.append((platform["id"], platform["name"]))
+                else:
+                    ids.append(platform["id"])
+                expected_domain = platform.get("expected_domain", "")
+                if expected_domain:
+                    domain_rules[platform["id"]] = expected_domain
+
+            print(
+                f"配置的监控平台: {[p.get('name', p['id']) for p in self.ctx.platforms]}"
+            )
+            print(f"开始爬取数据，请求间隔 {self.request_interval} 毫秒")
+            results, id_to_name, failed_ids = self.data_fetcher.crawl_websites(
+                ids, self.request_interval, domain_rules=domain_rules
+            )
+
+        # 小红书固定关键词搜索结果复用热榜存储和分析链路
+        if self.xiaohongshu_fetcher is not None:
+            xhs_results, xhs_names, xhs_failed = self.xiaohongshu_fetcher.fetch_all()
+            results.update(xhs_results)
+            id_to_name.update(xhs_names)
+            failed_ids.extend(xhs_failed)
 
         # 转换为 NewsData 格式并保存到存储后端
         crawl_time = self.ctx.format_time()
