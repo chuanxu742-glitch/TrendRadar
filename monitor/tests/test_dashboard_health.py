@@ -27,7 +27,14 @@ class DashboardContractTests(unittest.TestCase):
             'id="primaryFreshness"',
             'id="deferredSources"',
             'id="pendingSources"',
+            'id="siteInventoryTotal"',
+            'id="siteInventoryFetched"',
+            'id="siteInventoryCoverage"',
+            'id="siteInventoryClasses"',
+            'id="siteInventorySamples"',
+            'id="siteInventorySkipped"',
             '$("deferredSources").textContent=number(data.summary.deferred)',
+            '$("siteInventoryCoverage").textContent=percent(u.fetch_coverage)',
             "renderHealth(data.health)",
         ):
             self.assertIn(marker, self.dashboard)
@@ -40,6 +47,9 @@ class DashboardContractTests(unittest.TestCase):
             "容量延后",
             "来源覆盖与政策知识",
             "去重知识来源网址",
+            "全站稳定网址",
+            "低相关轮换抽检",
+            "未读取及跳过原因",
         ):
             self.assertIn(copy, self.dashboard)
         for misleading_copy in ("智能抓取成功", "等待人工处理", "现行政策知识库", "去重监控来源"):

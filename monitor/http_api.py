@@ -156,6 +156,38 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
             except (TypeError, ValueError) as exc:
                 self.send_json({"error": str(exc)}, 400)
             return
+        if path == "/api/v1/site-url-inventory":
+            try:
+                query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
+                origin = str(query.get("origin") or "").strip()
+                relevance = str(query.get("relevance") or "").strip().lower()
+                fetch_status = str(query.get("status") or "").strip().lower()
+                if relevance and relevance not in {"high", "medium", "low"}:
+                    raise ValueError("relevance must be high, medium, low, or empty")
+                limit = min(max(int(query.get("limit", "200") or 200), 1), 5000)
+                offset = max(int(query.get("offset", "0") or 0), 0)
+                page, count = om.query_site_url_inventory(
+                    origin=origin,
+                    relevance=relevance,
+                    fetch_status=fetch_status,
+                    limit=limit,
+                    offset=offset,
+                )
+                next_offset = offset + len(page)
+                has_more = next_offset < count
+                self.send_json({
+                    "summary": om.current_site_url_inventory_summary(),
+                    "items": page,
+                    "count": count,
+                    "page_count": len(page),
+                    "offset": offset,
+                    "limit": limit,
+                    "next_offset": next_offset if has_more else None,
+                    "has_more": has_more,
+                })
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
         if path == "/api/v1/sources":
             try:
                 query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))

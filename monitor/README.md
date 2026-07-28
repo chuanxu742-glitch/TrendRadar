@@ -6,10 +6,11 @@
 2. `official_monitor.py` 每 15 分钟从到期队列选择75个来源，默认使用 Scrapling Fetcher。
 3. 抓取 Agent 根据静态空壳、WAF、超时和站点历史，在有界循环内选择 Fetcher、DynamicFetcher 或 StealthyFetcher。
 4. 首次有效抓取及内容变化时保存不可变快照。
-5. Katana按官网域名读取 `robots.txt`、sitemap、HTML和JavaScript链接，并进行有范围的整站扫描。
-6. 重定向、可信 canonical 和多语言宠物运输相关链接进入候选队列。
-7. 候选页面验证通过后进入来源注册表；无关页面和静态资源自动退出监控。
-8. 变化事件写入 RSS，供 TrendRadar 消费；业务页面只展示确认后的政策条款变化。
+5. Katana按官网域名读取 `robots.txt`、sitemap、HTML和JavaScript链接，建立全站稳定 URL 台账。
+6. 所有稳定 URL 记录来源、链接上下文、相关度、读取状态和未读取原因。
+7. 高相关页面完整抓取，中相关页面按预算验证，低相关页面轮换抽检。
+8. 候选页面连续验证通过后进入来源注册表；无关页面保留审计记录但退出持续监控。
+9. 变化事件写入 RSS，供 TrendRadar 消费；业务页面只展示确认后的政策条款变化。
 
 ## 通用站点发现
 
@@ -17,9 +18,11 @@
 - 不绑定具体航司或国家，依据来源的官网域名和业务实体自动建立发现范围。
 - 优先从 `robots.txt` 和 sitemap 获取全站 URL；无 sitemap 时扫描首页、帮助、行李、特殊服务和货运等栏目。
 - 支持中、英、法、德、西、意、葡、荷、俄、日、韩、泰、阿拉伯等常见页面或 URL 关键词。
-- 每个官网按周期、sitemap 数、页面数、深度和候选数设置独立预算，避免拖慢现有巡检。
+- 每个官网按周期、sitemap 数、页面数和深度设置独立预算；每周执行更大范围的深度扫描。
 - 图片、字体、脚本、样式和媒体资源不会进入候选；PDF 政策文件保留。
-- 新 URL 先进入候选并验证主题，验证通过后才参与政策内容监控。
+- 新 URL 先写入全站台账。高相关页面直接验证，中相关页面按预算验证，低相关页面每30天轮换抽检。
+- 每个 URL 都保留首次/最近发现时间、发现方式、父页面、链接文字、相关度、读取状态和跳过原因。
+- 新 URL 验证通过后才参与政策内容监控。
 
 可通过以下环境变量调整：
 
@@ -38,6 +41,12 @@
 - `MONITOR_SITE_DISCOVERY_MAX_URLS`：单官网每轮最多新增候选数，默认 `150`。
 - `MONITOR_SITE_DISCOVERY_MAX_PAGES`：无 sitemap 时最多扫描的栏目页数，默认 `6`。
 - `MONITOR_SITE_DISCOVERY_MAX_DEPTH`：站内栏目扫描深度，默认 `2`。
+- `MONITOR_SITE_DISCOVERY_DEEP_INTERVAL`：同一官网深度扫描间隔，默认 `604800` 秒（7天）。
+- `MONITOR_SITE_DISCOVERY_DEEP_MAX_URLS`：深度扫描单官网最多登记稳定 URL 数，默认 `5000`。
+- `MONITOR_SITE_DISCOVERY_DEEP_MAX_PAGES`：深度扫描备用爬取页数，默认 `50`。
+- `MONITOR_SITE_INVENTORY_MEDIUM_FETCH_PER_SITE`：每个官网每轮验证的中相关 URL 数，默认 `20`。
+- `MONITOR_SITE_INVENTORY_LOW_SAMPLE_PER_SITE`：每个官网每轮抽检的低相关 URL 数，默认 `5`。
+- `MONITOR_SITE_INVENTORY_SAMPLE_INTERVAL`：低相关 URL 再次抽检间隔，默认 `2592000` 秒（30天）。
 - `MONITOR_KATANA_ENABLED`：是否使用Katana，默认 `true`。
 - `MONITOR_KATANA_DEPTH`：Katana爬取深度，默认 `3`。
 - `MONITOR_KATANA_MAX_PAGES`：单官网Katana最多处理页面数，默认 `150`。
@@ -86,8 +95,11 @@
 - `discovered_sources.json`：自动发现、尚待巡检的页面。
 - `site-discovery.json`：每个官网最近一次发现结果。
 - `site-discovery-summary.json`：最近一轮官网发现统计。
+- `site-url-inventory.db`：可扩展的全站稳定 URL、相关度、读取状态和未读取原因台账；旧版 JSON 会自动迁移。
+- `site-url-inventory-summary.json`：URL 总量、读取覆盖率、相关度分层和跳过原因汇总。
 - `events.json` / `feed.xml`：内容变化、失效、恢复和页面迁移事件。
 - `/api/v1/policy-change-digest`：按国家、地区或航司汇总通过完整证据链校验的当前有效修订；支持`from`、`to`、`kind`、`period=daily|weekly|monthly`、`format=json|text|markdown`和`limit`查询参数。
+- `/api/v1/site-url-inventory`：查询全站 URL 台账，支持按`origin`、`relevance`和`status`筛选。
 - `/api/brief.json`中的`policy_change_digest`：仪表盘“逐条变化 / 国家汇总”视图使用的结构化汇总及可复制中文文本。
 - `policy-digests/`：日报、周报、月报和 latest 的 JSON、纯文本、Markdown 原子快照；TrendRadar HTML 报告和通知渠道直接读取这些文件。
 - `snapshots/<source-id>/<timestamp>-<hash>/`：压缩原文、完整正文、元数据和差异。

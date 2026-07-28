@@ -70,6 +70,26 @@ class OfficialMonitorServiceTests(unittest.TestCase):
 
     @mock.patch(
         "mcp_server.services.official_monitor_service.urlopen",
+        return_value=FakeResponse({"summary": {"stable_urls": 3}, "items": []}),
+    )
+    def test_site_inventory_preserves_coverage_filters(self, mocked_open):
+        result = self.service.get_site_url_inventory(
+            origin="https://air.test/",
+            relevance="low",
+            fetch_status="unread",
+            limit=25,
+            offset=50,
+        )
+        request = mocked_open.call_args.args[0]
+        self.assertEqual(result["summary"]["stable_urls"], 3)
+        self.assertIn("/api/v1/site-url-inventory?", request.full_url)
+        self.assertIn("origin=https%3A%2F%2Fair.test%2F", request.full_url)
+        self.assertIn("relevance=low", request.full_url)
+        self.assertIn("status=unread", request.full_url)
+        self.assertIn("offset=50", request.full_url)
+
+    @mock.patch(
+        "mcp_server.services.official_monitor_service.urlopen",
         return_value=FakeResponse({"counts": {"changes": 1}, "country_groups": []}),
     )
     def test_policy_digest_preserves_date_and_entity_filters(self, mocked_open):
@@ -126,6 +146,10 @@ class FakeOfficialMonitor:
         self.calls.append(("policy", kwargs))
         return {"items": [{"change_id": "change:1"}], "next_cursor": 4}
 
+    def get_site_url_inventory(self, **kwargs):
+        self.calls.append(("site_inventory", kwargs))
+        return {"summary": {"stable_urls": 3}, "items": []}
+
     def get_policy_change_digest(self, **kwargs):
         self.calls.append(("digest", kwargs))
         return {"counts": {"changes": 1}, "text": "【政策变动汇总】"}
@@ -160,6 +184,15 @@ class OfficialMonitorMCPToolTests(unittest.TestCase):
                 states=["active"], roles=["current-primary"], limit=9000, offset=10
             )
         )
+        site_inventory = asyncio.run(
+            server.get_official_site_url_inventory.fn(
+                origin="https://air.test/",
+                relevance="low",
+                fetch_status="unread",
+                limit=9000,
+                offset=20,
+            )
+        )
         changes = asyncio.run(
             server.get_official_policy_changes.fn(
                 view="events", after_cursor=4, limit=900
@@ -184,6 +217,7 @@ class OfficialMonitorMCPToolTests(unittest.TestCase):
         current_knowledge = asyncio.run(server.get_official_current_knowledge.fn())
 
         self.assertEqual(json.loads(sources)["items"][0]["source_id"], "src:1")
+        self.assertEqual(json.loads(site_inventory)["summary"]["stable_urls"], 3)
         self.assertEqual(json.loads(changes)["next_cursor"], 4)
         self.assertEqual(json.loads(digest)["counts"]["changes"], 1)
         self.assertEqual(json.loads(reviews)["items"][0]["task_id"], "review:1")
@@ -196,10 +230,12 @@ class OfficialMonitorMCPToolTests(unittest.TestCase):
         )
         self.assertEqual(self.fake.calls[0][1]["limit"], 5000)
         self.assertEqual(self.fake.calls[0][1]["offset"], 10)
-        self.assertEqual(self.fake.calls[1][1]["limit"], 500)
-        self.assertEqual(self.fake.calls[2][1]["limit"], 10000)
-        self.assertEqual(self.fake.calls[2][1]["entity_kind"], "country")
-        self.assertEqual(self.fake.calls[3][1]["offset"], 30)
+        self.assertEqual(self.fake.calls[1][1]["limit"], 5000)
+        self.assertEqual(self.fake.calls[1][1]["offset"], 20)
+        self.assertEqual(self.fake.calls[2][1]["limit"], 500)
+        self.assertEqual(self.fake.calls[3][1]["limit"], 10000)
+        self.assertEqual(self.fake.calls[3][1]["entity_kind"], "country")
+        self.assertEqual(self.fake.calls[4][1]["offset"], 30)
 
 
 if __name__ == "__main__":

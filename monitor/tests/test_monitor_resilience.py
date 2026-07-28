@@ -739,6 +739,8 @@ class DashboardDataTests(unittest.TestCase):
             discover.assert_called_once()
             self.assertEqual(summary["eligible_sites"], 1)
             self.assertEqual(summary["new_policy_urls"], 2)
+            self.assertTrue(discover.call_args.args[6])
+            self.assertEqual(summary["deep_sites_checked"], 1)
 
     def test_site_discovery_processes_sites_concurrently_and_checkpoints_each_result(self) -> None:
         with temporary_monitor_directory() as temporary:
@@ -754,7 +756,15 @@ class DashboardDataTests(unittest.TestCase):
             peak = 0
             guard = threading.Lock()
 
-            def discover(_fetcher, source, discovered, events, _fallback_lock):
+            def discover(
+                _fetcher,
+                source,
+                discovered,
+                events,
+                _fallback_lock,
+                _url_inventory,
+                _deep_scan,
+            ):
                 nonlocal active, peak
                 with guard:
                     active += 1
@@ -872,7 +882,7 @@ class DashboardDataTests(unittest.TestCase):
         self.assertIn("-jc", command)
         self.assertIn("-mdp", command)
 
-    def test_katana_is_primary_and_registers_only_policy_urls(self) -> None:
+    def test_katana_enumeration_is_supplemented_by_site_inventory_scan(self) -> None:
         source = {
             "id": "air-test", "url": "https://air.test/known-policy",
             "entity_ids": ["airline:air-test"], "evidence_hints": ["official-context"],
@@ -886,11 +896,20 @@ class DashboardDataTests(unittest.TestCase):
                 "urls": ["https://air.test/travel/pets", "https://air.test/summer-sale"],
                 "duration_ms": 12,
             }),
-            mock.patch.object(official_monitor, "discover_site_fallback") as fallback,
+            mock.patch.object(official_monitor, "discover_site_fallback", return_value={
+                "origin": "https://air.test/",
+                "checked_at": official_monitor.now_iso(),
+                "engine": "内置发现器",
+                "sitemaps_checked": 1,
+                "pages_checked": 1,
+                "inventory_urls_seen": 0,
+                "new_policy_urls": 0,
+                "errors": 0,
+            }) as fallback,
         ):
             result = official_monitor.discover_site(mock.Mock(), source, discovered, events)
-        fallback.assert_not_called()
-        self.assertEqual(result["engine"], "Katana")
+        fallback.assert_called_once()
+        self.assertEqual(result["engine"], "Katana + 全站清单补充")
         self.assertEqual(result["new_policy_urls"], 1)
         self.assertIn("https://air.test/travel/pets", discovered)
         self.assertNotIn("https://air.test/summer-sale", discovered)
@@ -930,7 +949,7 @@ class DashboardDataTests(unittest.TestCase):
         ):
             result = official_monitor.discover_site(mock.Mock(), source, {}, [])
         fallback.assert_called_once()
-        self.assertEqual(result["engine"], "Katana + 内置补充")
+        self.assertEqual(result["engine"], "Katana + 全站清单补充")
         self.assertEqual(result["new_policy_urls"], 1)
 
     def test_discovery_probe_is_static_only_and_opens_domain_circuit_on_403(self) -> None:
@@ -948,6 +967,64 @@ class DashboardDataTests(unittest.TestCase):
         self.assertGreater(result["circuit_open_until"], time.time())
         self.assertEqual(fetcher.fetch_static.call_count, 1)
         fetcher.fetch.assert_not_called()
+
+    def test_site_inventory_registers_all_urls_and_samples_low_relevance_pages(self) -> None:
+        source = {
+            "id": "air",
+            "url": "https://air.test/pets",
+            "entity_ids": ["airline:air"],
+            "evidence_hints": ["official-context"],
+        }
+        sitemap = mock.Mock(
+            content=(
+                b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                b"<url><loc>https://air.test/travel/pets</loc></url>"
+                b"<url><loc>https://air.test/about</loc></url>"
+                b"<url><loc>https://air.test/search?q=pet</loc></url>"
+                b"</urlset>"
+            ),
+            url="https://air.test/sitemap.xml",
+            headers={"Content-Type": "application/xml"},
+        )
+        home = mock.Mock(
+            content=b"<html><title>Air Test</title><body>Welcome</body></html>",
+            url="https://air.test/",
+            headers={"Content-Type": "text/html"},
+        )
+
+        def fetch_document(_fetcher, url):
+            if url.endswith("robots.txt"):
+                return None, "页面不存在"
+            if url.endswith("sitemap.xml"):
+                return sitemap, ""
+            if url.endswith("sitemap_index.xml"):
+                return None, "页面不存在"
+            if url == "https://air.test/":
+                return home, ""
+            return None, "页面不存在"
+
+        discovered: dict[str, dict] = {}
+        inventory: dict[str, dict] = {}
+        events: list[dict] = []
+        with (
+            mock.patch.object(
+                official_monitor, "fetch_discovery_document", side_effect=fetch_document
+            ),
+            mock.patch.object(official_monitor, "SITE_DISCOVERY_MAX_PAGES", 1),
+            mock.patch.object(official_monitor, "SITE_INVENTORY_MEDIUM_FETCH_PER_SITE", 0),
+            mock.patch.object(official_monitor, "SITE_INVENTORY_LOW_SAMPLE_PER_SITE", 1),
+        ):
+            result = official_monitor.discover_site_fallback(
+                mock.Mock(), source, discovered, events, inventory
+            )
+
+        self.assertEqual(result["low_urls_sampled"], 1)
+        self.assertIn("https://air.test/travel/pets", inventory)
+        self.assertIn("https://air.test/about", inventory)
+        self.assertFalse(inventory["https://air.test/search?q=pet"]["stable"])
+        self.assertIn("https://air.test/travel/pets", discovered)
+        self.assertIn("https://air.test/about", discovered)
+        self.assertNotIn("https://air.test/search?q=pet", discovered)
 
     def test_language_variants_are_merged_into_one_monitored_policy_family(self) -> None:
         source = {

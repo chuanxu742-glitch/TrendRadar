@@ -174,6 +174,61 @@ class MonitorHttpContractTests(unittest.TestCase):
         self.assertIsNone(second["next_offset"])
         self.assertIs(second["has_more"], False)
 
+    def test_site_url_inventory_supports_filters_pagination_and_summary(self) -> None:
+        records = {
+            "https://air.test/pets": {
+                "url": "https://air.test/pets",
+                "origin": "https://air.test/",
+                "stable": True,
+                "relevance": "high",
+                "fetch_status": "fetched",
+                "last_fetched_at": NOW,
+            },
+            "https://air.test/about": {
+                "url": "https://air.test/about",
+                "origin": "https://air.test/",
+                "stable": True,
+                "relevance": "low",
+                "fetch_status": "unread",
+                "last_fetched_at": "",
+            },
+            "https://other.test/pets": {
+                "url": "https://other.test/pets",
+                "origin": "https://other.test/",
+                "stable": True,
+                "relevance": "high",
+                "fetch_status": "unread",
+                "last_fetched_at": "",
+            },
+        }
+        (self.root / "site-url-inventory.json").write_text(
+            json.dumps({"schema_version": 1, "urls": records}),
+            encoding="utf-8",
+        )
+
+        payload = self.fetch_json(
+            "/api/v1/site-url-inventory"
+            "?origin=https%3A%2F%2Fair.test%2F&limit=1"
+        )
+
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["page_count"], 1)
+        self.assertEqual(payload["next_offset"], 1)
+        self.assertEqual(payload["summary"]["stable_urls"], 3)
+        self.assertEqual(payload["summary"]["fetched_urls"], 1)
+
+        filtered = self.fetch_json(
+            "/api/v1/site-url-inventory?relevance=high&status=unread"
+        )
+        self.assertEqual(filtered["count"], 1)
+        self.assertEqual(filtered["items"][0]["url"], "https://other.test/pets")
+
+        status, body = self.fetch(
+            "/api/v1/site-url-inventory?relevance=urgent"
+        )
+        self.assertEqual(status, 400)
+        self.assertIn(b"relevance must be", body)
+
     def test_review_task_count_is_filtered_total_not_page_size(self) -> None:
         self.add_sources(5)
         for index in range(4):

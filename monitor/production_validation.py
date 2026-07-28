@@ -71,6 +71,30 @@ def validate_digest_contract(digest: dict[str, Any]) -> list[str]:
     return failures
 
 
+def validate_site_inventory_contract(payload: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    summary = payload.get("summary", {})
+    for key in ("stable_urls", "fetched_urls", "unread_urls"):
+        try:
+            value = int(summary.get(key, -1))
+        except (TypeError, ValueError):
+            value = -1
+        if value < 0:
+            failures.append(f"site inventory {key} is invalid")
+    try:
+        coverage = float(summary.get("fetch_coverage", -1))
+    except (TypeError, ValueError):
+        coverage = -1
+    if not 0 <= coverage <= 1:
+        failures.append("site inventory fetch coverage is outside 0..1")
+    items = payload.get("items")
+    if not isinstance(items, list):
+        failures.append("site inventory items are missing")
+    elif int(payload.get("page_count", -1) or 0) != len(items):
+        failures.append("site inventory page count does not match items")
+    return failures
+
+
 def run_validation(
     base_url: str,
     *,
@@ -113,6 +137,23 @@ def run_validation(
             failures.append(f"policy digest failed with HTTP {status}")
             break
     failures.extend(validate_digest_contract(digest))
+    try:
+        inventory_status, inventory_payload, inventory_latency = _get_json(
+            base + "/api/v1/site-url-inventory?limit=1",
+            timeout,
+        )
+        latencies.append(inventory_latency)
+        checks.append({
+            "path": "/api/v1/site-url-inventory",
+            "status_code": inventory_status,
+            "latency_ms": round(inventory_latency, 2),
+        })
+        if inventory_status != 200:
+            failures.append(f"site URL inventory failed with HTTP {inventory_status}")
+        else:
+            failures.extend(validate_site_inventory_contract(inventory_payload))
+    except (OSError, URLError) as exc:
+        failures.append(f"site URL inventory unavailable: {exc}")
     p95_ms = _percentile(latencies, 0.95)
     if p95_ms > max_p95_ms:
         failures.append(f"p95 latency {p95_ms:.2f}ms exceeds {max_p95_ms:.2f}ms")

@@ -91,6 +91,29 @@ class OfficialMonitorService:
     def get_functional_health(self) -> dict[str, Any]:
         return self._get("/health/functional", {})
 
+    def get_site_url_inventory(
+        self,
+        *,
+        origin: str = "",
+        relevance: str = "",
+        fetch_status: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        normalized_relevance = relevance.strip().lower()
+        if normalized_relevance not in {"", "high", "medium", "low"}:
+            raise ValueError("relevance must be high, medium, low, or empty")
+        return self._get(
+            "/api/v1/site-url-inventory",
+            {
+                "origin": origin.strip(),
+                "relevance": normalized_relevance,
+                "status": fetch_status.strip().lower(),
+                "limit": min(max(limit, 1), 5000),
+                "offset": max(offset, 0) or None,
+            },
+        )
+
     def get_policy_changes(
         self,
         *,

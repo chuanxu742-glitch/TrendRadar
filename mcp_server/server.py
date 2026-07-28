@@ -153,6 +153,35 @@ async def get_official_sources(
 
 
 @mcp.tool
+async def get_official_site_url_inventory(
+    origin: str = "",
+    relevance: str = "",
+    fetch_status: str = "",
+    limit: int = 200,
+    offset: int = 0,
+) -> str:
+    """查询全站稳定 URL 台账、读取覆盖率和未读取原因。
+
+    Args:
+        origin: 官网根地址，例如 https://www.example.com/；留空返回全部。
+        relevance: high、medium、low 或留空。
+        fetch_status: fetched、scheduled、unread、skipped 或留空。
+        limit: 最大返回数量，范围 1-5000。
+        offset: 分页偏移量。
+    """
+    tools = _get_tools()
+    result = await asyncio.to_thread(
+        tools["official_monitor"].get_site_url_inventory,
+        origin=origin,
+        relevance=relevance,
+        fetch_status=fetch_status,
+        limit=min(max(limit, 1), 5000),
+        offset=max(offset, 0),
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool
 async def get_official_policy_changes(
     view: str = "effective",
     after_cursor: int = 0,
@@ -1337,11 +1366,12 @@ def run_server(
     print()
     print("    === 官方来源监控 ===")
     print("    27. get_official_sources          - 查询来源及生命周期状态")
-    print("    28. get_official_policy_changes   - 查询有效变化或修订事件流")
-    print("    29. get_official_policy_change_digest - 按国家/航司汇总有效变化")
-    print("    30. get_official_review_tasks     - 查询人工复核任务")
-    print("    31. get_official_knowledge_updates - 查询知识更新提案")
-    print("    32. get_official_current_knowledge - 查询已应用的现行规则")
+    print("    28. get_official_site_url_inventory - 查询全站URL覆盖率和未读取原因")
+    print("    29. get_official_policy_changes   - 查询有效变化或修订事件流")
+    print("    30. get_official_policy_change_digest - 按国家/航司汇总有效变化")
+    print("    31. get_official_review_tasks     - 查询人工复核任务")
+    print("    32. get_official_knowledge_updates - 查询知识更新提案")
+    print("    33. get_official_current_knowledge - 查询已应用的现行规则")
     print("=" * 60)
     print()
 

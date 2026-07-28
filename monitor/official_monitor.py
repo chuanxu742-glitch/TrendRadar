@@ -83,6 +83,27 @@ except ImportError:
     from policy_metadata import extract_sourced_policy_metadata
 
 try:
+    from .site_url_inventory import (
+        inventory_summary,
+        mark_fetch_result,
+        mark_scheduled,
+        merge_site_url_record,
+        register_site_url,
+        select_due_records,
+        skip_reason_category,
+    )
+except ImportError:
+    from site_url_inventory import (
+        inventory_summary,
+        mark_fetch_result,
+        mark_scheduled,
+        merge_site_url_record,
+        register_site_url,
+        select_due_records,
+        skip_reason_category,
+    )
+
+try:
     from .scrapling_fetch import BrowserFetchBudget, ScraplingAdaptiveFetcher
     from .scraping_agent import AgentStateStore
 except ImportError:
@@ -173,12 +194,51 @@ SITE_DISCOVERY_MAX_SITEMAPS = max(int(os.getenv("MONITOR_SITE_DISCOVERY_MAX_SITE
 SITE_DISCOVERY_MAX_URLS = max(int(os.getenv("MONITOR_SITE_DISCOVERY_MAX_URLS", "150")), 1)
 SITE_DISCOVERY_MAX_PAGES = max(int(os.getenv("MONITOR_SITE_DISCOVERY_MAX_PAGES", "6")), 1)
 SITE_DISCOVERY_MAX_DEPTH = max(int(os.getenv("MONITOR_SITE_DISCOVERY_MAX_DEPTH", "2")), 0)
+SITE_DISCOVERY_DEEP_INTERVAL_SECONDS = max(
+    int(os.getenv("MONITOR_SITE_DISCOVERY_DEEP_INTERVAL", "604800")), 86400
+)
+SITE_DISCOVERY_DEEP_MAX_SITEMAPS = max(
+    int(os.getenv("MONITOR_SITE_DISCOVERY_DEEP_MAX_SITEMAPS", "50")),
+    SITE_DISCOVERY_MAX_SITEMAPS,
+)
+SITE_DISCOVERY_DEEP_MAX_URLS = max(
+    int(os.getenv("MONITOR_SITE_DISCOVERY_DEEP_MAX_URLS", "5000")),
+    SITE_DISCOVERY_MAX_URLS,
+)
+SITE_DISCOVERY_DEEP_MAX_PAGES = max(
+    int(os.getenv("MONITOR_SITE_DISCOVERY_DEEP_MAX_PAGES", "50")),
+    SITE_DISCOVERY_MAX_PAGES,
+)
+SITE_DISCOVERY_DEEP_MAX_DEPTH = max(
+    int(os.getenv("MONITOR_SITE_DISCOVERY_DEEP_MAX_DEPTH", "4")),
+    SITE_DISCOVERY_MAX_DEPTH,
+)
+SITE_INVENTORY_MEDIUM_FETCH_PER_SITE = max(
+    int(os.getenv("MONITOR_SITE_INVENTORY_MEDIUM_FETCH_PER_SITE", "20")), 0
+)
+SITE_INVENTORY_LOW_SAMPLE_PER_SITE = max(
+    int(os.getenv("MONITOR_SITE_INVENTORY_LOW_SAMPLE_PER_SITE", "5")), 0
+)
+SITE_INVENTORY_SAMPLE_INTERVAL_SECONDS = max(
+    int(os.getenv("MONITOR_SITE_INVENTORY_SAMPLE_INTERVAL", "2592000")), 86400
+)
 KATANA_ENABLED = os.getenv("MONITOR_KATANA_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 KATANA_PATH = os.getenv("MONITOR_KATANA_PATH", "/usr/local/bin/katana")
 KATANA_DEPTH = max(int(os.getenv("MONITOR_KATANA_DEPTH", "3")), 3)
 KATANA_MAX_PAGES = max(int(os.getenv("MONITOR_KATANA_MAX_PAGES", "150")), 10)
 KATANA_CRAWL_DURATION = max(int(os.getenv("MONITOR_KATANA_CRAWL_DURATION", "30")), 15)
 KATANA_PROCESS_TIMEOUT = max(int(os.getenv("MONITOR_KATANA_PROCESS_TIMEOUT", "45")), KATANA_CRAWL_DURATION + 15)
+KATANA_DEEP_DEPTH = max(int(os.getenv("MONITOR_KATANA_DEEP_DEPTH", "5")), KATANA_DEPTH)
+KATANA_DEEP_MAX_PAGES = max(
+    int(os.getenv("MONITOR_KATANA_DEEP_MAX_PAGES", "1000")), KATANA_MAX_PAGES
+)
+KATANA_DEEP_CRAWL_DURATION = max(
+    int(os.getenv("MONITOR_KATANA_DEEP_CRAWL_DURATION", "120")), KATANA_CRAWL_DURATION
+)
+KATANA_DEEP_PROCESS_TIMEOUT = max(
+    int(os.getenv("MONITOR_KATANA_DEEP_PROCESS_TIMEOUT", "150")),
+    KATANA_DEEP_CRAWL_DURATION + 15,
+)
 STATE_IO_LOCK = threading.RLock()
 STORE_LOCK = threading.RLock()
 POLICY_LEDGER_LOCK = threading.RLock()
@@ -727,6 +787,9 @@ def functional_health_summary(
         and oldest_pending_age > KNOWLEDGE_PENDING_WARN_SECONDS
     ):
         reasons.append("knowledge_update_backlog_overdue")
+    site_inventory_health = load_json(site_url_inventory_summary_path(), {})
+    if not isinstance(site_inventory_health, dict):
+        site_inventory_health = {}
     return {
         "status": "unhealthy" if unhealthy else ("degraded" if reasons else "healthy"),
         "reasons": reasons,
@@ -745,6 +808,7 @@ def functional_health_summary(
         "current_primary_monitored_sources": len(monitored_primary_sources),
         "primary_source_current_failures": len(primary_failure_ids),
         "primary_source_unverified_failures": len(primary_unverified_failure_ids),
+        "site_url_inventory": site_inventory_health,
         "freshness": freshness,
         "evidence_agent": {
             "status": evidence_status,
@@ -789,6 +853,399 @@ def persist_shared_updates(
         save_json(discovered_path, current_discovered)
         save_json(events_path, current_events)
         return current_discovered, current_events
+
+
+def site_url_inventory_path() -> Path:
+    """Legacy JSON path retained for one-time migration."""
+    return STATE_DIR / "site-url-inventory.json"
+
+
+def site_url_inventory_database_path() -> Path:
+    return STATE_DIR / "site-url-inventory.db"
+
+
+def site_url_inventory_summary_path() -> Path:
+    return STATE_DIR / "site-url-inventory-summary.json"
+
+
+def _site_url_inventory_connection() -> sqlite3.Connection:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(
+        site_url_inventory_database_path(),
+        timeout=30,
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=30000")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS site_urls (
+            url TEXT PRIMARY KEY,
+            origin TEXT NOT NULL,
+            relevance TEXT NOT NULL,
+            stable INTEGER NOT NULL,
+            fetch_status TEXT NOT NULL,
+            last_seen_at TEXT,
+            last_skip_reason TEXT NOT NULL DEFAULT '',
+            data_json TEXT NOT NULL
+        )
+        """
+    )
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(site_urls)").fetchall()
+    }
+    if "last_skip_reason" not in columns:
+        connection.execute(
+            "ALTER TABLE site_urls "
+            "ADD COLUMN last_skip_reason TEXT NOT NULL DEFAULT ''"
+        )
+        rows = connection.execute(
+            "SELECT url, data_json FROM site_urls"
+        ).fetchall()
+        backfill = []
+        for row in rows:
+            try:
+                record = json.loads(row["data_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(record, dict) and record.get("last_skip_reason"):
+                backfill.append((
+                    str(record["last_skip_reason"]),
+                    str(row["url"]),
+                ))
+        if backfill:
+            connection.executemany(
+                "UPDATE site_urls SET last_skip_reason=? WHERE url=?",
+                backfill,
+            )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_site_urls_origin_relevance "
+        "ON site_urls(origin, relevance, fetch_status)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_site_urls_skip_reason "
+        "ON site_urls(last_skip_reason)"
+    )
+    connection.commit()
+    return connection
+
+
+def _load_legacy_site_url_inventory() -> dict[str, dict[str, Any]]:
+    payload = load_json(site_url_inventory_path(), {})
+    if not isinstance(payload, dict):
+        return {}
+    records = payload.get("urls", payload)
+    if not isinstance(records, dict):
+        return {}
+    return {
+        str(url): dict(record)
+        for url, record in records.items()
+        if isinstance(record, dict)
+    }
+
+
+def load_site_url_inventory(
+    origin: str = "",
+) -> dict[str, dict[str, Any]]:
+    database = site_url_inventory_database_path()
+    if not database.exists():
+        records = _load_legacy_site_url_inventory()
+        if origin:
+            return {
+                url: record
+                for url, record in records.items()
+                if record.get("origin") == origin
+            }
+        return records
+    connection = _site_url_inventory_connection()
+    try:
+        if origin:
+            rows = connection.execute(
+                "SELECT url, data_json FROM site_urls WHERE origin=? ORDER BY url",
+                (origin,),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT url, data_json FROM site_urls ORDER BY url"
+            ).fetchall()
+    finally:
+        connection.close()
+    records: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            value = json.loads(row["data_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            records[str(row["url"])] = value
+    return records
+
+
+def load_site_url_records(urls: list[str]) -> dict[str, dict[str, Any]]:
+    selected = list(dict.fromkeys(url for url in urls if url))
+    if not selected:
+        return {}
+    if not site_url_inventory_database_path().exists():
+        legacy = _load_legacy_site_url_inventory()
+        return {url: legacy[url] for url in selected if url in legacy}
+    connection = _site_url_inventory_connection()
+    rows: list[sqlite3.Row] = []
+    try:
+        for index in range(0, len(selected), 500):
+            chunk = selected[index:index + 500]
+            rows.extend(connection.execute(
+                f"SELECT url, data_json FROM site_urls "
+                f"WHERE url IN ({','.join('?' for _ in chunk)})",
+                chunk,
+            ).fetchall())
+    finally:
+        connection.close()
+    records: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            value = json.loads(row["data_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            records[str(row["url"])] = value
+    return records
+
+
+def query_site_url_inventory(
+    *,
+    origin: str = "",
+    relevance: str = "",
+    fetch_status: str = "",
+    limit: int = 200,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    if not site_url_inventory_database_path().exists():
+        records = [
+            record
+            for record in load_site_url_inventory().values()
+            if (not origin or record.get("origin") == origin)
+            and (not relevance or record.get("relevance") == relevance)
+            and (not fetch_status or record.get("fetch_status") == fetch_status)
+        ]
+        records.sort(key=lambda record: str(record.get("url", "")))
+        return records[offset:offset + limit], len(records)
+    clauses: list[str] = []
+    values: list[Any] = []
+    for column, value in (
+        ("origin", origin),
+        ("relevance", relevance),
+        ("fetch_status", fetch_status),
+    ):
+        if value:
+            clauses.append(f"{column}=?")
+            values.append(value)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    connection = _site_url_inventory_connection()
+    try:
+        count = int(connection.execute(
+            f"SELECT COUNT(*) FROM site_urls {where}",
+            values,
+        ).fetchone()[0])
+        rows = connection.execute(
+            f"SELECT data_json FROM site_urls {where} "
+            "ORDER BY relevance, url LIMIT ? OFFSET ?",
+            [*values, max(int(limit), 0), max(int(offset), 0)],
+        ).fetchall()
+    finally:
+        connection.close()
+    items = []
+    for row in rows:
+        try:
+            value = json.loads(row["data_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            items.append(value)
+    return items, count
+
+
+def current_site_url_inventory_summary() -> dict[str, Any]:
+    summary = load_json(site_url_inventory_summary_path(), {})
+    if isinstance(summary, dict) and summary:
+        return summary
+    return inventory_summary(load_site_url_inventory())
+
+
+def _database_site_url_inventory_summary() -> dict[str, Any]:
+    connection = _site_url_inventory_connection()
+    try:
+        totals = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total_urls,
+                SUM(CASE WHEN stable=1 THEN 1 ELSE 0 END) AS stable_urls,
+                SUM(CASE WHEN stable=1 AND relevance='high' THEN 1 ELSE 0 END)
+                    AS high_relevance,
+                SUM(CASE WHEN stable=1 AND relevance='medium' THEN 1 ELSE 0 END)
+                    AS medium_relevance,
+                SUM(CASE WHEN stable=1 AND relevance='low' THEN 1 ELSE 0 END)
+                    AS low_relevance,
+                SUM(CASE WHEN stable=1 AND fetch_status='fetched' THEN 1 ELSE 0 END)
+                    AS fetched_urls,
+                SUM(
+                    CASE
+                        WHEN stable=1
+                            AND relevance='low'
+                            AND fetch_status='fetched'
+                        THEN 1 ELSE 0
+                    END
+                ) AS low_relevance_sampled,
+                SUM(CASE WHEN stable=0 THEN 1 ELSE 0 END) AS skipped_urls,
+                COUNT(DISTINCT CASE WHEN origin<>'' THEN origin END) AS origins
+            FROM site_urls
+            """
+        ).fetchone()
+        reason_rows = connection.execute(
+            """
+            SELECT last_skip_reason, COUNT(*) AS reason_count
+            FROM site_urls
+            WHERE last_skip_reason<>''
+            GROUP BY last_skip_reason
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    values = {
+        key: int(totals[key] or 0)
+        for key in totals.keys()
+    }
+    reasons: Counter[str] = Counter()
+    for row in reason_rows:
+        category = skip_reason_category(row["last_skip_reason"])
+        if category:
+            reasons[category] += int(row["reason_count"] or 0)
+    stable = values["stable_urls"]
+    fetched = values["fetched_urls"]
+    return {
+        "schema_version": 1,
+        **values,
+        "unread_urls": max(stable - fetched, 0),
+        "fetch_coverage": round(fetched / max(stable, 1), 4),
+        "skip_reasons": dict(reasons.most_common(12)),
+        "updated_at": now_iso(),
+    }
+
+
+def persist_site_url_updates(
+    updates: dict[str, dict[str, Any]],
+    *,
+    refresh_summary: bool = True,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    with STATE_IO_LOCK:
+        database_existed = site_url_inventory_database_path().exists()
+        legacy = _load_legacy_site_url_inventory() if not database_existed else {}
+        connection = _site_url_inventory_connection()
+        persisted: dict[str, dict[str, Any]] = {}
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            pending = dict(legacy)
+            for url, record in updates.items():
+                pending[url] = merge_site_url_record(pending.get(url, {}), record)
+            for url, record in pending.items():
+                row = connection.execute(
+                    "SELECT data_json FROM site_urls WHERE url=?",
+                    (url,),
+                ).fetchone()
+                previous: dict[str, Any] = {}
+                if row is not None:
+                    try:
+                        loaded = json.loads(row["data_json"])
+                    except (TypeError, json.JSONDecodeError):
+                        loaded = {}
+                    if isinstance(loaded, dict):
+                        previous = loaded
+                merged = merge_site_url_record(previous, record)
+                persisted[url] = merged
+                connection.execute(
+                    """
+                    INSERT INTO site_urls(
+                        url, origin, relevance, stable, fetch_status,
+                        last_seen_at, last_skip_reason, data_json
+                    ) VALUES (?,?,?,?,?,?,?,?)
+                    ON CONFLICT(url) DO UPDATE SET
+                        origin=excluded.origin,
+                        relevance=excluded.relevance,
+                        stable=excluded.stable,
+                        fetch_status=excluded.fetch_status,
+                        last_seen_at=excluded.last_seen_at,
+                        last_skip_reason=excluded.last_skip_reason,
+                        data_json=excluded.data_json
+                    """,
+                    (
+                        url,
+                        str(merged.get("origin", "")),
+                        str(merged.get("relevance", "low")),
+                        int(bool(merged.get("stable", True))),
+                        str(merged.get("fetch_status", "unread")),
+                        str(merged.get("last_seen_at", "")),
+                        str(merged.get("last_skip_reason", "")),
+                        json.dumps(merged, ensure_ascii=False, separators=(",", ":")),
+                    ),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if refresh_summary:
+            summary = _database_site_url_inventory_summary()
+            save_json(site_url_inventory_summary_path(), summary)
+            return persisted, summary
+        summary = load_json(site_url_inventory_summary_path(), {})
+        return persisted, summary if isinstance(summary, dict) else {}
+
+
+def seed_site_url_inventory(
+    sources: list[dict[str, Any]],
+    state: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_sources = {
+        normalized: source
+        for source in sources
+        if (
+            normalized := normalize_candidate_url(
+                str(source.get("url", "")),
+                str(source.get("url", "")),
+            )
+        )
+    }
+    current = load_site_url_records(list(normalized_sources))
+    updates: dict[str, dict[str, Any]] = {}
+    for normalized, source in normalized_sources.items():
+        if normalized in current:
+            continue
+        local: dict[str, dict[str, Any]] = {}
+        record = observe_site_url(
+            local,
+            normalized,
+            source,
+            "existing-monitor-source",
+            title=str(source.get("name", "")),
+        )
+        if record is None:
+            continue
+        source_state = state.get(str(source.get("id", "")), {})
+        if source_state.get("checked_at"):
+            record = mark_fetch_result(
+                record,
+                source_state,
+                sampled_again_after_seconds=SITE_INVENTORY_SAMPLE_INTERVAL_SECONDS,
+            )
+        updates[normalized] = record
+    if updates:
+        _, summary = persist_site_url_updates(updates)
+        return summary
+    summary = load_json(site_url_inventory_summary_path(), {})
+    if isinstance(summary, dict) and summary:
+        return summary
+    return inventory_summary(load_site_url_inventory())
 
 
 def load_state_with_journal(path: Path) -> dict[str, Any]:
@@ -2219,6 +2676,10 @@ def dashboard_payload() -> dict[str, Any]:
     discovery_summary = load_json(SITE_DISCOVERY_SUMMARY_PATH, status.get("site_discovery", {}))
     if isinstance(discovery_summary, dict):
         discovery_summary = dict(discovery_summary)
+        url_inventory_summary = load_json(site_url_inventory_summary_path(), {})
+        if not isinstance(url_inventory_summary, dict) or not url_inventory_summary:
+            url_inventory_summary = inventory_summary(load_site_url_inventory())
+        discovery_summary["url_inventory"] = url_inventory_summary
         if str(discovery_summary.get("engine", "")).startswith("Katana"):
             discovery_summary["engine"] = "站内网址发现器"
     progress = load_json(SCAN_PROGRESS_PATH, {})
@@ -2418,6 +2879,7 @@ def dashboard_payload() -> dict[str, Any]:
             "sites_due": 0,
             "sites_checked": 0,
             "new_policy_urls": 0,
+            "url_inventory": inventory_summary(load_site_url_inventory()),
         },
         "agent": {
             "attempts": int(agent_status.get("attempts", 0)),
@@ -3245,9 +3707,44 @@ def discovered_source(url: str, source: dict[str, Any], reason: str) -> dict[str
     }
 
 
+def source_origin(source: dict[str, Any]) -> str:
+    parts = urlsplit(source["url"])
+    return urlunsplit((parts.scheme or "https", parts.netloc, "/", "", ""))
+
+
+def observe_site_url(
+    inventory: dict[str, dict[str, Any]] | None,
+    url: str,
+    source: dict[str, Any],
+    discovery_method: str,
+    *,
+    parent_url: str = "",
+    anchor: str = "",
+    title: str = "",
+    parent_context: str = "",
+) -> dict[str, Any] | None:
+    if inventory is None:
+        return None
+    return register_site_url(
+        inventory,
+        url,
+        origin=source_origin(source),
+        source_id=str(source.get("id", "")),
+        entity_ids=source.get("entity_ids", []),
+        discovery_method=discovery_method,
+        parent_url=parent_url,
+        anchor=anchor,
+        title=title,
+        parent_context=parent_context,
+        direct_terms=MULTILINGUAL_URL_TERMS,
+        hub_terms=DISCOVERY_HUB_TERMS,
+    )
+
+
 def discover_page_candidates(
     source: dict[str, Any], final_url: str, facts: dict[str, Any], normalized: str,
     discovered: dict[str, dict[str, Any]], events: list[dict[str, Any]],
+    url_inventory: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     if not any(entity.startswith(("airline:", "country:")) for entity in source.get("entity_ids", [])):
         return
@@ -3273,7 +3770,18 @@ def discover_page_candidates(
     ):
         for href, anchor in facts.get("links", []):
             candidate = normalize_candidate_url(href, final_url)
-            if not candidate or candidate == original or not same_site(candidate, final_url):
+            if not candidate or not same_site(candidate, final_url):
+                continue
+            record = observe_site_url(
+                url_inventory,
+                candidate,
+                source,
+                "monitored-page-link",
+                parent_url=final_url,
+                anchor=anchor,
+                parent_context=normalized[:500],
+            )
+            if candidate == original or (record is not None and not record.get("stable", True)):
                 continue
             signal = f"{urlsplit(candidate).path} {anchor}".lower()
             if any(contains_term(signal, term) for term in LINK_DISCOVERY_TERMS):
@@ -3319,6 +3827,7 @@ def register_discovered_candidate(
     reason: str,
     discovered: dict[str, dict[str, Any]],
     events: list[dict[str, Any]],
+    extra_metadata: dict[str, Any] | None = None,
 ) -> bool:
     normalized = normalize_candidate_url(url, source["url"])
     if not normalized or normalized in discovered or not usable_candidate_url(normalized):
@@ -3336,6 +3845,8 @@ def register_discovered_candidate(
         discovered[normalized] = alias
         return False
     item = discovered_source(normalized, source, reason)
+    if extra_metadata:
+        item.update(extra_metadata)
     discovered[normalized] = item
     add_event(
         events,
@@ -3348,6 +3859,75 @@ def register_discovered_candidate(
         },
     )
     return True
+
+
+def schedule_site_inventory_candidates(
+    origin: str,
+    source: dict[str, Any],
+    inventory: dict[str, dict[str, Any]],
+    discovered: dict[str, dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> dict[str, int]:
+    active_urls = {
+        url for url, item in discovered.items() if item.get("monitor_enabled", True)
+    }
+    selections = {
+        "high": select_due_records(
+            inventory,
+            origin=origin,
+            relevance="high",
+            limit=SITE_DISCOVERY_DEEP_MAX_URLS,
+            minimum_interval_seconds=SITE_DISCOVERY_DEEP_INTERVAL_SECONDS,
+            active_urls=active_urls,
+        ),
+        "medium": select_due_records(
+            inventory,
+            origin=origin,
+            relevance="medium",
+            limit=SITE_INVENTORY_MEDIUM_FETCH_PER_SITE,
+            minimum_interval_seconds=SITE_DISCOVERY_DEEP_INTERVAL_SECONDS,
+            active_urls=active_urls,
+        ),
+        "low": select_due_records(
+            inventory,
+            origin=origin,
+            relevance="low",
+            limit=SITE_INVENTORY_LOW_SAMPLE_PER_SITE,
+            minimum_interval_seconds=SITE_INVENTORY_SAMPLE_INTERVAL_SECONDS,
+            active_urls=active_urls,
+        ),
+    }
+    scheduled = Counter()
+    reason_by_relevance = {
+        "high": "site-inventory-high-relevance",
+        "medium": "site-inventory-medium-relevance",
+        "low": "site-inventory-low-relevance-sample",
+    }
+    for relevance, urls in selections.items():
+        for url in urls:
+            reason = reason_by_relevance[relevance]
+            metadata = {
+                "inventory_relevance": relevance,
+                "inventory_score": int(inventory[url].get("relevance_score", 0) or 0),
+                "sample_only": relevance == "low",
+            }
+            created = register_discovered_candidate(
+                url,
+                source,
+                reason,
+                discovered,
+                events,
+                extra_metadata=metadata,
+            )
+            if created:
+                active_urls.add(url)
+                scheduled[relevance] += 1
+                inventory[url] = mark_scheduled(inventory[url], reason)
+    return {
+        "high_urls_scheduled": scheduled["high"],
+        "medium_urls_scheduled": scheduled["medium"],
+        "low_urls_sampled": scheduled["low"],
+    }
 
 
 def trusted_discovery_source(source: dict[str, Any]) -> bool:
@@ -3383,25 +3963,47 @@ def discover_site_fallback(
     source: dict[str, Any],
     discovered: dict[str, dict[str, Any]],
     events: list[dict[str, Any]],
+    url_inventory: dict[str, dict[str, Any]] | None = None,
+    deep_scan: bool = False,
 ) -> dict[str, Any]:
-    """Discover policy URLs across one trusted site with strict crawl budgets."""
+    """Enumerate stable site URLs, then schedule policy pages under strict budgets."""
     started = time.monotonic()
-    parts = urlsplit(source["url"])
-    origin = urlunsplit((parts.scheme or "https", parts.netloc, "/", "", ""))
+    origin = source_origin(source)
+    max_sitemaps = (
+        SITE_DISCOVERY_DEEP_MAX_SITEMAPS if deep_scan else SITE_DISCOVERY_MAX_SITEMAPS
+    )
+    max_urls = SITE_DISCOVERY_DEEP_MAX_URLS if deep_scan else SITE_DISCOVERY_MAX_URLS
+    max_pages = SITE_DISCOVERY_DEEP_MAX_PAGES if deep_scan else SITE_DISCOVERY_MAX_PAGES
+    max_depth = SITE_DISCOVERY_DEEP_MAX_DEPTH if deep_scan else SITE_DISCOVERY_MAX_DEPTH
     found = 0
+    urls_seen = 0
     sitemap_urls_checked = 0
     pages_checked = 0
     sitemap_queue = [urljoin(origin, "sitemap.xml"), urljoin(origin, "sitemap_index.xml")]
     error_categories: Counter[str] = Counter()
 
     def finish(blocked: bool = False) -> dict[str, Any]:
+        scheduled = (
+            schedule_site_inventory_candidates(
+                origin, source, url_inventory, discovered, events
+            )
+            if url_inventory is not None and not blocked
+            else {
+                "high_urls_scheduled": 0,
+                "medium_urls_scheduled": 0,
+                "low_urls_sampled": 0,
+            }
+        )
         return {
             "origin": origin,
             "checked_at": now_iso(),
             "engine": "内置发现器",
+            "deep_scan": deep_scan,
             "sitemaps_checked": sitemap_urls_checked,
             "pages_checked": pages_checked,
             "new_policy_urls": found,
+            "inventory_urls_seen": urls_seen,
+            **scheduled,
             "errors": sum(error_categories.values()),
             "error_categories": dict(error_categories),
             "blocked": blocked,
@@ -3423,7 +4025,7 @@ def discover_site_fallback(
 
     seen_sitemaps: set[str] = set()
     for sitemap_url in sitemap_queue:
-        if sitemap_url in seen_sitemaps or sitemap_urls_checked >= SITE_DISCOVERY_MAX_SITEMAPS:
+        if sitemap_url in seen_sitemaps or sitemap_urls_checked >= max_sitemaps:
             continue
         seen_sitemaps.add(sitemap_url)
         response, sitemap_error = fetch_discovery_document(fetcher, sitemap_url)
@@ -3439,16 +4041,33 @@ def discover_site_fallback(
             if same_site(nested, origin) and nested not in seen_sitemaps:
                 sitemap_queue.append(nested)
         for candidate in page_urls:
-            if found >= SITE_DISCOVERY_MAX_URLS:
+            if urls_seen >= max_urls:
                 break
-            if same_site(candidate, origin) and discovery_signal(candidate):
+            if not same_site(candidate, origin):
+                continue
+            urls_seen += 1
+            record = observe_site_url(
+                url_inventory,
+                candidate,
+                source,
+                "sitemap",
+                parent_url=response.url,
+            )
+            if (
+                usable_candidate_url(candidate)
+                and (record is None or record.get("stable", True))
+                and (
+                    discovery_signal(candidate)
+                    or (record is not None and record.get("relevance") == "high")
+                )
+            ):
                 found += int(register_discovered_candidate(
                     candidate, source, "site-sitemap-policy-url", discovered, events
                 ))
 
     crawl_queue: list[tuple[str, int]] = [(origin, 0)]
     visited_pages: set[str] = set()
-    while crawl_queue and pages_checked < SITE_DISCOVERY_MAX_PAGES and found < SITE_DISCOVERY_MAX_URLS:
+    while crawl_queue and pages_checked < max_pages and urls_seen < max_urls:
         current_url, depth = crawl_queue.pop(0)
         if current_url in visited_pages:
             continue
@@ -3465,23 +4084,65 @@ def discover_site_fallback(
         if "html" not in content_type and b"<html" not in response.content[:2000].lower():
             continue
         facts = parse_html_facts(response.content, response.url, content_type)
+        page_record = observe_site_url(
+            url_inventory,
+            response.url,
+            source,
+            "crawl-page",
+            parent_url=current_url,
+            title=str(facts.get("metadata", {}).get("og:title", "")),
+        )
+        if page_record is not None:
+            page_text, _ = normalize_html(response.content, content_type=content_type)
+            relevant, _ = topic_relevance(page_text)
+            url_inventory[response.url] = mark_fetch_result(
+                page_record,
+                {
+                    "status": "ok",
+                    "status_code": getattr(response, "status_code", 200),
+                    "checked_at": now_iso(),
+                    "fetch_mode": "discovery",
+                    "validation": {"topic_relevant": relevant},
+                },
+                sampled_again_after_seconds=SITE_INVENTORY_SAMPLE_INTERVAL_SECONDS,
+            )
         for href, anchor in facts.get("links", []):
             candidate = normalize_candidate_url(href, response.url)
-            if not candidate or not same_site(candidate, origin) or not usable_candidate_url(candidate):
+            if not candidate or not same_site(candidate, origin):
                 continue
-            if discovery_signal(candidate, anchor):
+            urls_seen += 1
+            record = observe_site_url(
+                url_inventory,
+                candidate,
+                source,
+                "crawl-link",
+                parent_url=response.url,
+                anchor=anchor,
+            )
+            if record is not None and not record.get("stable", True):
+                continue
+            if usable_candidate_url(candidate) and (
+                discovery_signal(candidate, anchor)
+                or (record is not None and record.get("relevance") == "high")
+            ):
                 found += int(register_discovered_candidate(
                     candidate, source, "site-crawl-policy-link", discovered, events
                 ))
-            elif depth < SITE_DISCOVERY_MAX_DEPTH and discovery_hub_signal(candidate, anchor):
+            elif depth < max_depth and discovery_hub_signal(candidate, anchor):
                 crawl_queue.append((candidate, depth + 1))
+            if urls_seen >= max_urls:
+                break
 
     return finish()
 
 
-def katana_discover_urls(origin: str) -> dict[str, Any]:
+def katana_discover_urls(origin: str, *, deep_scan: bool = False) -> dict[str, Any]:
     started = time.monotonic()
     timed_out = False
+    crawl_depth = KATANA_DEEP_DEPTH if deep_scan else KATANA_DEPTH
+    max_pages = KATANA_DEEP_MAX_PAGES if deep_scan else KATANA_MAX_PAGES
+    crawl_duration = KATANA_DEEP_CRAWL_DURATION if deep_scan else KATANA_CRAWL_DURATION
+    process_timeout = KATANA_DEEP_PROCESS_TIMEOUT if deep_scan else KATANA_PROCESS_TIMEOUT
     with tempfile.TemporaryDirectory(prefix="katana-discovery-") as temporary:
         output_path = Path(temporary) / "urls.txt"
         command = [
@@ -3489,14 +4150,14 @@ def katana_discover_urls(origin: str) -> dict[str, Any]:
             "-u", origin,
             "-silent",
             "-nc",
-            "-d", str(KATANA_DEPTH),
+            "-d", str(crawl_depth),
             "-s", "breadth-first",
             "-jc",
             "-kf", "all",
             "-iqp",
             "-fs", "rdn",
-            "-mdp", str(KATANA_MAX_PAGES),
-            "-ct", f"{KATANA_CRAWL_DURATION}s",
+            "-mdp", str(max_pages),
+            "-ct", f"{crawl_duration}s",
             "-timeout", str(REQUEST_TIMEOUT),
             "-retry", "1",
             "-H", f"User-Agent: {USER_AGENT}",
@@ -3510,7 +4171,7 @@ def katana_discover_urls(origin: str) -> dict[str, Any]:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=KATANA_PROCESS_TIMEOUT,
+                timeout=process_timeout,
                 check=False,
             )
         except FileNotFoundError:
@@ -3533,15 +4194,16 @@ def katana_discover_urls(origin: str) -> dict[str, Any]:
             candidate = normalize_candidate_url(line.strip(), origin)
             if candidate and same_site(candidate, origin) and usable_candidate_url(candidate):
                 urls.append(candidate)
-    urls = list(dict.fromkeys(urls))[:KATANA_MAX_PAGES]
+    urls = list(dict.fromkeys(urls))[:max_pages]
     return {
         "ok": bool(urls),
         "urls": urls,
+        "deep_scan": deep_scan,
         "returncode": result.returncode,
         "timed_out": timed_out,
         "duration_ms": round((time.monotonic() - started) * 1000),
         "error": (
-            f"Katana reached {KATANA_PROCESS_TIMEOUT}s hard timeout; partial URLs retained"
+            f"Katana reached {process_timeout}s hard timeout; partial URLs retained"
             if timed_out else result.stderr.strip()[-500:] if result.returncode else ""
         ),
     }
@@ -3553,45 +4215,67 @@ def discover_site(
     discovered: dict[str, dict[str, Any]],
     events: list[dict[str, Any]],
     fallback_lock: threading.Lock | None = None,
+    url_inventory: dict[str, dict[str, Any]] | None = None,
+    deep_scan: bool = False,
 ) -> dict[str, Any]:
     def run_fallback() -> dict[str, Any]:
         if fallback_lock is None:
-            return discover_site_fallback(fetcher, source, discovered, events)
+            return discover_site_fallback(
+                fetcher, source, discovered, events, url_inventory, deep_scan
+            )
         with fallback_lock:
-            return discover_site_fallback(fetcher, source, discovered, events)
+            return discover_site_fallback(
+                fetcher, source, discovered, events, url_inventory, deep_scan
+            )
 
-    parts = urlsplit(source["url"])
-    origin = urlunsplit((parts.scheme or "https", parts.netloc, "/", "", ""))
+    origin = source_origin(source)
     if KATANA_ENABLED:
-        katana = katana_discover_urls(origin)
+        katana = katana_discover_urls(origin, deep_scan=deep_scan)
         if katana.get("ok"):
             found = 0
             for candidate in katana["urls"]:
-                if found >= SITE_DISCOVERY_MAX_URLS:
-                    break
-                if discovery_signal(candidate):
+                record = observe_site_url(
+                    url_inventory,
+                    candidate,
+                    source,
+                    "katana-deep-crawl" if deep_scan else "katana-crawl",
+                    parent_url=origin,
+                )
+                if usable_candidate_url(candidate) and (
+                    discovery_signal(candidate)
+                    or (record is not None and record.get("relevance") == "high")
+                ):
                     found += int(register_discovered_candidate(
                         candidate, source, "katana-site-crawl", discovered, events
                     ))
-            if found:
-                return {
-                    "origin": origin,
-                    "checked_at": now_iso(),
-                    "engine": "Katana",
-                    "urls_seen": len(katana["urls"]),
-                    "sitemaps_checked": 0,
-                    "pages_checked": len(katana["urls"]),
-                    "new_policy_urls": found,
-                    "duration_ms": katana.get("duration_ms", 0),
-                    "partial": bool(katana.get("timed_out")),
-                    "errors": int(bool(katana.get("timed_out"))),
-                }
             fallback = run_fallback()
+            scheduled = (
+                schedule_site_inventory_candidates(
+                    origin, source, url_inventory, discovered, events
+                )
+                if url_inventory is not None and not fallback.get("blocked")
+                else {
+                    "high_urls_scheduled": 0,
+                    "medium_urls_scheduled": 0,
+                    "low_urls_sampled": 0,
+                }
+            )
             fallback.update({
-                "engine": "Katana + 内置补充",
+                "engine": "Katana + 全站清单补充",
+                "deep_scan": deep_scan,
                 "katana_urls_seen": len(katana["urls"]),
                 "katana_duration_ms": katana.get("duration_ms", 0),
                 "katana_partial": bool(katana.get("timed_out")),
+                "pages_checked": int(fallback.get("pages_checked", 0) or 0) + len(katana["urls"]),
+                "inventory_urls_seen": (
+                    int(fallback.get("inventory_urls_seen", 0) or 0) + len(katana["urls"])
+                ),
+                "new_policy_urls": int(fallback.get("new_policy_urls", 0) or 0) + found,
+                "errors": int(fallback.get("errors", 0) or 0) + int(bool(katana.get("timed_out"))),
+                **{
+                    key: int(fallback.get(key, 0) or 0) + int(value)
+                    for key, value in scheduled.items()
+                },
             })
             return fallback
 
@@ -3610,9 +4294,13 @@ def run_site_discovery(
     if not isinstance(state, dict):
         state = {}
     if not SITE_DISCOVERY_ENABLED or SITE_DISCOVERY_SITES_PER_CYCLE <= 0:
+        current_inventory_summary = load_json(site_url_inventory_summary_path(), {})
+        if not isinstance(current_inventory_summary, dict) or not current_inventory_summary:
+            current_inventory_summary = inventory_summary(load_site_url_inventory())
         summary = {
             "enabled": SITE_DISCOVERY_ENABLED, "eligible_sites": 0, "sites_due": 0,
             "sites_checked": 0, "new_policy_urls": 0, "engine": "Katana" if KATANA_ENABLED else "内置发现器",
+            "url_inventory": current_inventory_summary,
         }
         save_json(SITE_DISCOVERY_SUMMARY_PATH, summary)
         return summary
@@ -3626,7 +4314,7 @@ def run_site_discovery(
         by_origin.setdefault(origin, source)
 
     now_timestamp = time.time()
-    due: list[tuple[int, float, str, dict[str, Any]]] = []
+    due: list[tuple[int, float, str, dict[str, Any], bool]] = []
     circuit_open_sites = 0
     for origin, source in by_origin.items():
         if float(state.get(origin, {}).get("circuit_open_until", 0) or 0) > now_timestamp:
@@ -3638,9 +4326,15 @@ def run_site_discovery(
         except (TypeError, ValueError):
             checked_timestamp = 0.0
         if now_timestamp - checked_timestamp >= SITE_DISCOVERY_INTERVAL_SECONDS:
+            last_deep_scan = str(state.get(origin, {}).get("last_deep_scan_at", ""))
+            try:
+                deep_timestamp = datetime.fromisoformat(last_deep_scan).timestamp()
+            except (TypeError, ValueError):
+                deep_timestamp = 0.0
+            deep_scan = now_timestamp - deep_timestamp >= SITE_DISCOVERY_DEEP_INTERVAL_SECONDS
             entity_ids = source.get("entity_ids", [])
             entity_priority = 0 if any(entity.startswith("airline:") for entity in entity_ids) else 1
-            due.append((entity_priority, checked_timestamp, origin, source))
+            due.append((entity_priority, checked_timestamp, origin, source, deep_scan))
     due.sort(key=lambda item: (item[0], item[1], item[2]))
 
     selected = due[:SITE_DISCOVERY_SITES_PER_CYCLE]
@@ -3648,15 +4342,44 @@ def run_site_discovery(
     discovered_snapshot = dict(discovered)
     fallback_lock = threading.Lock()
 
-    def discover_one(origin: str, source: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    def discover_one(
+        origin: str,
+        source: dict[str, Any],
+        deep_scan: bool,
+    ) -> tuple[
+        str,
+        dict[str, Any],
+        dict[str, Any],
+        list[dict[str, Any]],
+        dict[str, dict[str, Any]],
+    ]:
         local_discovered = dict(discovered_snapshot)
+        origin_inventory = load_site_url_inventory(origin)
+        local_inventory = {
+            key: dict(value) for key, value in origin_inventory.items()
+        }
         local_events: list[dict[str, Any]] = []
-        result = discover_site(fetcher, source, local_discovered, local_events, fallback_lock)
+        result = discover_site(
+            fetcher,
+            source,
+            local_discovered,
+            local_events,
+            fallback_lock,
+            local_inventory,
+            deep_scan,
+        )
+        result["deep_scan"] = deep_scan
+        if deep_scan:
+            result["last_deep_scan_at"] = result.get("checked_at") or now_iso()
         additions = {
             key: value for key, value in local_discovered.items()
             if key not in discovered_snapshot
         }
-        return origin, result, additions, local_events
+        inventory_updates = {
+            key: value for key, value in local_inventory.items()
+            if key not in origin_inventory or value != origin_inventory.get(key)
+        }
+        return origin, result, additions, local_events, inventory_updates
 
     previous_summary = load_json(SITE_DISCOVERY_SUMMARY_PATH, {})
     previous_checked = max(int(previous_summary.get("sites_checked", 0) or 0), 1)
@@ -3665,27 +4388,29 @@ def run_site_discovery(
     workers = min(SITE_DISCOVERY_CONCURRENCY, adaptive_limit, len(selected))
     with ThreadPoolExecutor(max_workers=max(workers, 1)) as executor:
         futures = {
-            executor.submit(discover_one, origin, source): origin
-            for _, _, origin, source in selected
+            executor.submit(discover_one, origin, source, deep_scan): origin
+            for _, _, origin, source, deep_scan in selected
         }
         for future in as_completed(futures):
             origin = futures[future]
             try:
-                _, result, additions, new_events = future.result()
+                _, result, additions, new_events, inventory_updates = future.result()
             except Exception as exc:
                 result = {
                     "origin": origin, "checked_at": now_iso(), "engine": "Katana",
                     "sitemaps_checked": 0, "pages_checked": 0, "new_policy_urls": 0,
                     "errors": 1, "error": str(exc)[:300],
                 }
-                additions, new_events = {}, []
+                additions, new_events, inventory_updates = {}, [], {}
             current_discovered, current_events = persist_shared_updates(additions, new_events)
+            persist_site_url_updates(inventory_updates, refresh_summary=True)
             discovered.clear()
             discovered.update(current_discovered)
             events[:] = current_events
             state[origin] = result
             results.append(result)
             save_json(SITE_DISCOVERY_STATE_PATH, state)
+    _, url_inventory_summary = persist_site_url_updates({}, refresh_summary=True)
     summary = {
         "enabled": True,
         "engine": "Katana" if any(str(item.get("engine", "")).startswith("Katana") for item in results) else "内置发现器",
@@ -3696,6 +4421,11 @@ def run_site_discovery(
         "configured_concurrency": SITE_DISCOVERY_CONCURRENCY,
         "adaptive_limited": workers < min(SITE_DISCOVERY_CONCURRENCY, len(selected)),
         "new_policy_urls": sum(item["new_policy_urls"] for item in results),
+        "inventory_urls_seen": sum(int(item.get("inventory_urls_seen", 0) or 0) for item in results),
+        "deep_sites_checked": sum(bool(item.get("deep_scan")) for item in results),
+        "high_urls_scheduled": sum(int(item.get("high_urls_scheduled", 0) or 0) for item in results),
+        "medium_urls_scheduled": sum(int(item.get("medium_urls_scheduled", 0) or 0) for item in results),
+        "low_urls_sampled": sum(int(item.get("low_urls_sampled", 0) or 0) for item in results),
         "sitemaps_checked": sum(item["sitemaps_checked"] for item in results),
         "pages_checked": sum(item["pages_checked"] for item in results),
         "errors": sum(item["errors"] for item in results),
@@ -3704,6 +4434,7 @@ def run_site_discovery(
         "error_categories": dict(sum((Counter(item.get("error_categories", {})) for item in results), Counter())),
         "duration_p50_ms": percentile([int(item.get("duration_ms", 0) or 0) for item in results], 0.5),
         "duration_p95_ms": percentile([int(item.get("duration_ms", 0) or 0) for item in results], 0.95),
+        "url_inventory": url_inventory_summary,
     }
     save_json(SITE_DISCOVERY_SUMMARY_PATH, summary)
     return summary
@@ -4280,6 +5011,7 @@ def source_refs(source: dict[str, Any]) -> list[str]:
 def scan_source(
     fetcher: ScraplingAdaptiveFetcher, source: dict[str, Any], previous: dict[str, Any],
     events: list[dict[str, Any]], discovered: dict[str, dict[str, Any]] | None = None,
+    site_inventory: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     checked_at = now_iso()
     refs = source_refs(source)
@@ -4409,7 +5141,15 @@ def scan_source(
                 1,
             )
         if discovered is not None and is_html:
-            discover_page_candidates(source, response.url, facts, full_text, discovered, events)
+            discover_page_candidates(
+                source,
+                response.url,
+                facts,
+                full_text,
+                discovered,
+                events,
+                site_inventory,
+            )
         content_changed = (
             previous.get("status") == "ok"
             and previous.get("sha256")
@@ -4821,6 +5561,7 @@ def scan() -> dict[str, Any]:
         source_id: migrate_failure_record(record)
         for source_id, record in load_state_with_journal(state_path).items()
     }
+    seed_site_url_inventory(sources, state)
     events = load_json(events_path, [])
     previous_registry = load_json(registry_path, {})
     meta = load_json(meta_path, {"cursor": 0, "known_source_ids": []})
@@ -4902,6 +5643,11 @@ def scan() -> dict[str, Any]:
     worker_fetchers: list[ScraplingAdaptiveFetcher] = []
     worker_fetchers_lock = threading.Lock()
     discovered_snapshot = dict(discovered)
+    site_inventory_snapshot = load_site_url_records([
+        source_by_id[source_id]["url"]
+        for source_id in batch_ids
+        if source_id in source_by_id
+    ])
     effective_scan_concurrency, adaptive_reason = adaptive_scan_concurrency(state)
     scan_started_monotonic = time.monotonic()
     fetch_durations: list[int] = []
@@ -4924,15 +5670,37 @@ def scan() -> dict[str, Any]:
             worker_fetchers.append(current)
         return current
 
-    def scan_one(position: int, source: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, Any], list[dict[str, Any]], tuple[str, ...], int]:
+    def scan_one(
+        position: int,
+        source: dict[str, Any],
+    ) -> tuple[
+        int,
+        dict[str, Any],
+        dict[str, Any],
+        list[dict[str, Any]],
+        tuple[str, ...],
+        dict[str, dict[str, Any]],
+        int,
+    ]:
         started = time.monotonic()
         local_events: list[dict[str, Any]] = []
         local_discovered = dict(discovered_snapshot)
+        local_site_inventory: dict[str, dict[str, Any]] = {}
+        if source["url"] in site_inventory_snapshot:
+            local_site_inventory[source["url"]] = dict(
+                site_inventory_snapshot[source["url"]]
+            )
         host = urlsplit(source["url"]).hostname or source["id"]
         with host_locks[host]:
             record = scan_source(
                 page_fetcher(), source, state.get(source["id"], {}),
                 local_events, local_discovered,
+            )
+        if source["url"] in local_site_inventory:
+            local_site_inventory[source["url"]] = mark_fetch_result(
+                local_site_inventory[source["url"]],
+                record,
+                sampled_again_after_seconds=SITE_INVENTORY_SAMPLE_INTERVAL_SECONDS,
             )
         if source_monitor_role(source) == "candidate" and record.get("status") == "ok":
             relevant = bool(record.get("validation", {}).get("topic_relevant"))
@@ -4963,7 +5731,15 @@ def scan() -> dict[str, Any]:
             remove_urls = (source["url"],)
         duration_ms = round((time.monotonic() - started) * 1000)
         record["fetch_duration_ms"] = duration_ms
-        return position, record, additions, local_events, remove_urls, duration_ms
+        return (
+            position,
+            record,
+            additions,
+            local_events,
+            remove_urls,
+            local_site_inventory,
+            duration_ms,
+        )
 
     pending = [
         (position, source_by_id[source_id])
@@ -4990,7 +5766,15 @@ def scan() -> dict[str, Any]:
         for future in as_completed(futures):
             position, source = futures[future]
             try:
-                _, record, additions, new_events, remove_urls, duration_ms = future.result()
+                (
+                    _,
+                    record,
+                    additions,
+                    new_events,
+                    remove_urls,
+                    site_inventory_updates,
+                    duration_ms,
+                ) = future.result()
             except Exception as exc:
                 record = {
                     "name": source.get("name") or urlsplit(source["url"]).netloc,
@@ -4998,13 +5782,27 @@ def scan() -> dict[str, Any]:
                     "checked_at": now_iso(), "validation": {"valid": False},
                     "consecutive_failures": int(state.get(source["id"], {}).get("consecutive_failures", 0)) + 1,
                 }
-                additions, new_events, remove_urls, duration_ms = {}, [], (), 0
+                additions, new_events, remove_urls, site_inventory_updates, duration_ms = (
+                    {},
+                    [],
+                    (),
+                    {},
+                    0,
+                )
             record = persist_check_result(source, state.get(source["id"], {}), record)
             if duration_ms:
                 fetch_durations.append(duration_ms)
             state[source["id"]] = record
             append_state_journal({source["id"]: record})
             discovered, events = persist_shared_updates(additions, new_events, remove_urls)
+            if site_inventory_updates:
+                persisted_inventory, _ = persist_site_url_updates(
+                    site_inventory_updates,
+                    refresh_summary=False,
+                )
+                site_inventory_snapshot.update({
+                    url: persisted_inventory[url] for url in site_inventory_updates
+                })
             completed_ids.add(source["id"])
             next_index = 0
             while next_index < len(batch_ids) and batch_ids[next_index] in completed_ids:
@@ -5055,6 +5853,15 @@ def scan() -> dict[str, Any]:
     active_state = {key: value for key, value in state.items() if key in active}
     registry = build_source_registry(inventory, active_state, previous_registry, events)
     due_count = int(progress.get("due_count", len(batch_ids)) or 0)
+    _, latest_site_inventory_summary = persist_site_url_updates(
+        {},
+        refresh_summary=True,
+    )
+    if isinstance(site_discovery, dict):
+        site_discovery = {
+            **site_discovery,
+            "url_inventory": latest_site_inventory_summary,
+        }
     functional_health = functional_health_summary(sources, state, due_count)
     meta = {
         "cursor": next_cursor, "known_source_ids": current_ids, "last_batch_started_at": now_iso(),
