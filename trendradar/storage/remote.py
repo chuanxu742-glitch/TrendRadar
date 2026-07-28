@@ -30,6 +30,7 @@ except ImportError:
 
 from trendradar.storage.base import StorageBackend, NewsData, RSSItem, RSSData
 from trendradar.storage.sqlite_mixin import SQLiteStorageMixin
+from trendradar.storage.sqlite_mixin import OFFICIAL_CHANGE_CHECKPOINT_DATE
 from trendradar.utils.time import (
     DEFAULT_TIMEZONE,
     get_configured_time,
@@ -313,7 +314,7 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                 print(f"[远程存储] 上传验证成功: {r2_key}")
                 return True
             else:
-                print(f"[远程存储] 上传验证失败: 文件未在远程存储中找到")
+                print("[远程存储] 上传验证失败: 文件未在远程存储中找到")
                 return False
 
         except Exception as e:
@@ -393,10 +394,10 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
 
         # 上传到远程存储
         if self._upload_sqlite(data.date):
-            print(f"[远程存储] 数据已同步到远程存储")
+            print("[远程存储] 数据已同步到远程存储")
             return True
         else:
-            print(f"[远程存储] 上传远程存储失败")
+            print("[远程存储] 上传远程存储失败")
             return False
 
     def get_today_all_data(self, date: Optional[str] = None) -> Optional[NewsData]:
@@ -433,10 +434,10 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
 
             # 上传到远程存储确保记录持久化
             if self._upload_sqlite(date_str):
-                print(f"[远程存储] 时间段执行记录已同步到远程存储")
+                print("[远程存储] 时间段执行记录已同步到远程存储")
                 return True
             else:
-                print(f"[远程存储] 时间段执行记录同步到远程存储失败")
+                print("[远程存储] 时间段执行记录同步到远程存储失败")
                 return False
 
         return False
@@ -445,13 +446,91 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
     # RSS 数据存储方法
     # ========================================
 
+    def _persist_official_change_checkpoint(self) -> bool:
+        """Persist the cross-day policy revision cursor before publishing results."""
+        return self._upload_sqlite(OFFICIAL_CHANGE_CHECKPOINT_DATE, db_type="rss")
+
+    def _verify_official_change_checkpoint_state(
+        self,
+        change_revisions: List[tuple[str, int]],
+        expected_state: str,
+    ) -> Optional[bool]:
+        """Read the remote checkpoint back without replacing the open local database."""
+        remote_key = self._get_remote_db_key(
+            OFFICIAL_CHANGE_CHECKPOINT_DATE,
+            "rss",
+        )
+        response = None
+        verify_path = None
+        try:
+            response = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key=remote_key,
+            )
+            body = response["Body"]
+            with tempfile.NamedTemporaryFile(
+                prefix="official-checkpoint-verify-",
+                suffix=".db",
+                dir=self.temp_dir,
+                delete=False,
+            ) as verify_file:
+                verify_path = Path(verify_file.name)
+                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
+                    verify_file.write(chunk)
+
+            verify_conn = sqlite3.connect(str(verify_path))
+            verify_conn.row_factory = sqlite3.Row
+            try:
+                placeholders = ",".join("?" for _ in change_revisions)
+                rows = verify_conn.execute(f"""
+                    SELECT change_id, revision, delivery_state
+                    FROM official_change_checkpoint
+                    WHERE change_id IN ({placeholders})
+                """, [change_id for change_id, _ in change_revisions]).fetchall()
+            finally:
+                verify_conn.close()
+
+            remote_states = {
+                str(row["change_id"]): (
+                    int(row["revision"]),
+                    str(row["delivery_state"]),
+                )
+                for row in rows
+            }
+            return all(
+                remote_states.get(change_id) == (revision, expected_state)
+                for change_id, revision in change_revisions
+            )
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code in ("404", "NoSuchKey", "Not Found"):
+                return False
+            print(f"[远程存储] 权威变化游标读回失败 (错误码: {error_code}): {exc}")
+            return None
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return False
+            print(f"[远程存储] 权威变化游标读回数据库异常: {exc}")
+            return None
+        except Exception as exc:
+            print(f"[远程存储] 权威变化游标读回异常: {exc}")
+            return None
+        finally:
+            if response is not None:
+                body = response.get("Body")
+                if body is not None and hasattr(body, "close"):
+                    body.close()
+            if verify_path is not None:
+                verify_path.unlink(missing_ok=True)
+
     def save_rss_data(self, data: RSSData) -> bool:
         """
         保存 RSS 数据到远程存储
 
         流程：下载现有数据库 → 插入/更新数据 → 上传回远程存储
         """
-        success, new_count, updated_count = self._save_rss_data_impl(data, "[远程存储]")
+        success, new_count, updated_count, deactivated_count, ai_state_changed_count = \
+            self._save_rss_data_impl(data, "[远程存储]")
 
         if not success:
             return False
@@ -460,14 +539,29 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         log_parts = [f"[远程存储] RSS 处理完成：新增 {new_count} 条"]
         if updated_count > 0:
             log_parts.append(f"更新 {updated_count} 条")
+        if deactivated_count > 0:
+            log_parts.append(f"停用 {deactivated_count} 条")
+        if ai_state_changed_count > 0:
+            log_parts.append(f"同步 AI 状态 {ai_state_changed_count} 条")
         print("，".join(log_parts))
 
-        # 上传到远程存储
-        if self._upload_sqlite(data.date, db_type="rss"):
-            print(f"[远程存储] RSS 数据已同步到远程存储")
+        # 官方源同步会同时影响 RSS 与 news 库；每个成功周期都重传 news，
+        # 这样上一次远端上传中断后也能自动收敛。
+        authoritative_success = (
+            "official-source-changes" in data.items
+            and "official-source-changes" not in data.failed_ids
+            and "official-source-changes" in data.authoritative_complete_ids
+        )
+        news_uploaded = True
+        if authoritative_success:
+            news_uploaded = self._upload_sqlite(data.date)
+        rss_uploaded = news_uploaded and self._upload_sqlite(data.date, db_type="rss")
+
+        if rss_uploaded and news_uploaded:
+            print("[远程存储] RSS 数据已同步到远程存储")
             return True
         else:
-            print(f"[远程存储] RSS 上传远程存储失败")
+            print("[远程存储] RSS/AI 状态上传远程存储失败")
             return False
 
     def get_rss_data(self, date: Optional[str] = None) -> Optional[RSSData]:
@@ -477,6 +571,13 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
     def detect_new_rss_items(self, current_data: RSSData) -> Dict[str, List[RSSItem]]:
         """检测新增的 RSS 条目"""
         return self._detect_new_rss_items_impl(current_data)
+
+    def acknowledge_official_changes(
+        self,
+        change_revisions: List[tuple[str, int]],
+    ) -> bool:
+        """仅在报告或通知成功后确认官网变化已交付并同步远端。"""
+        return self._acknowledge_official_changes_impl(change_revisions)
 
     def get_latest_rss_data(self, date: Optional[str] = None) -> Optional[RSSData]:
         """获取最新一次抓取的 RSS 数据"""

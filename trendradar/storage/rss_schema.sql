@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS rss_items (
     feed_id TEXT NOT NULL,                    -- 所属 RSS 源
     url TEXT NOT NULL,                        -- 文章链接
     guid TEXT DEFAULT '',                     -- GUID/ID（RSS guid 或 Atom id）
+    change_id TEXT DEFAULT '',                -- 上游稳定变更 ID（结构化变化源）
+    revision INTEGER DEFAULT 0,               -- 上游修订号
+    status TEXT DEFAULT '',                   -- confirmed / retracted / superseded
+    supersedes TEXT DEFAULT '',               -- 当前变更替代的 change_id
+    is_active INTEGER DEFAULT 1,              -- 是否仍属于上游有效集合
+    deactivated_at TEXT,                      -- 停用时间
+    revision_crawl_time TEXT DEFAULT '',      -- 首次看到当前修订的抓取时间
+    ai_sync_pending INTEGER DEFAULT 0,         -- AI 结果失效同步待办（失败后重试）
     published_at TEXT,                        -- RSS 发布时间（ISO 格式）
     summary TEXT,                             -- 摘要/描述
     author TEXT,                              -- 作者
@@ -79,6 +87,18 @@ CREATE TABLE IF NOT EXISTS rss_push_records (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 跨日权威变化游标。普通 RSS 仍按日存储；结构化政策变化按 change_id + revision 去重。
+CREATE TABLE IF NOT EXISTS official_change_checkpoint (
+    change_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT '',
+    delivery_state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (delivery_state IN ('pending', 'delivered')),
+    reported_at TEXT NOT NULL,
+    delivered_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
 -- ============================================
 -- 索引定义
 -- ============================================
@@ -98,10 +118,6 @@ CREATE INDEX IF NOT EXISTS idx_rss_title ON rss_items(title);
 -- URL + feed_id 唯一索引（实现去重）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_url_feed
     ON rss_items(url, feed_id);
-
--- GUID + feed_id 部分唯一索引（guid 非空时优先用 guid 去重）
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_guid_feed
-    ON rss_items(guid, feed_id) WHERE guid != '';
 
 -- 抓取状态索引
 CREATE INDEX IF NOT EXISTS idx_rss_crawl_status_record ON rss_crawl_status(crawl_record_id);

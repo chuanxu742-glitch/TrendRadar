@@ -21,6 +21,11 @@ IGNORED_HOSTS = {
     "fonts.googleapis.com", "fonts.gstatic.com", "ka-p.fontawesome.com",
     "www.google-analytics.com", "www.googletagmanager.com", "www.w3.org",
 }
+NON_SOURCE_HOST_SUFFIXES = (
+    "google.com", "google.com.hk", "google.co.uk", "googleusercontent.com",
+    "outlook.com", "office.com", "office365.com", "live.com",
+)
+ANNOTATION_MARKERS = ("备注", "引用", "原文", "抓取", "超时", "失效", "不可达", "官方", "依据", "说明")
 SOCIAL_HOST_SUFFIXES = (
     "facebook.com", "instagram.com", "linkedin.com", "pinterest.com",
     "tiktok.com", "twitter.com", "x.com", "youtube.com",
@@ -46,6 +51,18 @@ def clean_url(raw: str) -> str | None:
     if parts.scheme.lower() not in {"http", "https"} or not host or "." not in host:
         return None
     if host in IGNORED_HOSTS or any(host == item or host.endswith("." + item) for item in SOCIAL_HOST_SUFFIXES):
+        return None
+    if (
+        any(host == item or host.endswith("." + item) for item in NON_SOURCE_HOST_SUFFIXES)
+        or host.startswith("google.")
+        or host.startswith("www.google.")
+    ):
+        return None
+    has_cjk = any("\u4e00" <= character <= "\u9fff" for character in value)
+    if has_cjk and (
+        any(marker in value for marker in ANNOTATION_MARKERS)
+        or any(mark in value for mark in "（），；）")
+    ):
         return None
     if Path(parts.path).suffix.lower() in IGNORED_EXTENSIONS:
         return None
@@ -141,6 +158,9 @@ def build(root: Path) -> dict:
                     "categories": [],
                     "knowledge_base_refs": [],
                     "entity_ids": [],
+                    "applies_to_entity_ids": [],
+                    "document_mentions_entity_ids": [],
+                    "owner_organization_ids": [],
                     "evidence_hints": [],
                 },
             )
@@ -148,9 +168,20 @@ def build(root: Path) -> dict:
                 item["categories"].append(category)
             if relative not in item["knowledge_base_refs"]:
                 item["knowledge_base_refs"].append(relative)
+            hints = context_hints(text, url)
             if entity_id and entity_id not in item["entity_ids"]:
+                # Compatibility field. New consumers must distinguish a document
+                # mention from policy applicability and source ownership.
                 item["entity_ids"].append(entity_id)
-            for hint in context_hints(text, url):
+            if entity_id and entity_id not in item["document_mentions_entity_ids"]:
+                item["document_mentions_entity_ids"].append(entity_id)
+            if (
+                entity_id
+                and any(hint in {"official-context", "primary-page-context"} for hint in hints)
+                and entity_id not in item["applies_to_entity_ids"]
+            ):
+                item["applies_to_entity_ids"].append(entity_id)
+            for hint in hints:
                 if hint not in item["evidence_hints"]:
                     item["evidence_hints"].append(hint)
 
@@ -166,6 +197,9 @@ def build(root: Path) -> dict:
         item["categories"].sort()
         item["knowledge_base_refs"].sort()
         item["entity_ids"].sort()
+        item["applies_to_entity_ids"].sort()
+        item["document_mentions_entity_ids"].sort()
+        item["owner_organization_ids"].sort()
         item["evidence_hints"].sort()
         for category in item["categories"]:
             category_counts[category] += 1
@@ -188,6 +222,8 @@ def build(root: Path) -> dict:
         entity["candidate_source_ids"] = sorted(set(entity["candidate_source_ids"]))
         entity["knowledge_base_refs"] = sorted(set(entity["knowledge_base_refs"]))
     return {
+        "schema_version": 1,
+        "generation_status": "complete",
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
         "knowledge_base_root": str(root),
         "files_scanned": files_scanned,

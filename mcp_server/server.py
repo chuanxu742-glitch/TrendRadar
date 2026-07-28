@@ -19,6 +19,7 @@ from .tools.system import SystemManagementTools
 from .tools.storage_sync import StorageSyncTools
 from .tools.article_reader import ArticleReaderTools
 from .tools.notification import NotificationTools
+from .services.official_monitor_service import OfficialMonitorService
 from .utils.date_parser import DateParser
 from .utils.errors import MCPError
 
@@ -41,6 +42,7 @@ def _get_tools(project_root: Optional[str] = None):
         _tools_instances['storage'] = StorageSyncTools(project_root)
         _tools_instances['article'] = ArticleReaderTools(project_root)
         _tools_instances['notification'] = NotificationTools(project_root)
+        _tools_instances['official_monitor'] = OfficialMonitorService()
     return _tools_instances
 
 
@@ -111,6 +113,141 @@ async def get_keywords_resource() -> str:
         "total_groups": config.get("total_groups", 0),
         "description": "TrendRadar 关注词配置"
     }, ensure_ascii=False, indent=2)
+
+
+@mcp.resource("monitor://functional-health")
+async def get_official_monitor_health_resource() -> str:
+    """Return the official monitor's functional health record."""
+    tools = _get_tools()
+    result = await asyncio.to_thread(
+        tools['official_monitor'].get_functional_health
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# ==================== 官方来源监控 ====================
+
+@mcp.tool
+async def get_official_sources(
+    states: Optional[List[str]] = None,
+    roles: Optional[List[str]] = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> str:
+    """查询官方来源及其持久化生命周期状态。
+
+    Args:
+        states: 生命周期状态，例如 active、degraded、quarantined、retired。
+        roles: 来源角色，例如 current-primary、trusted-secondary、candidate。
+        limit: 最大返回数量，范围 1-5000。
+    """
+    tools = _get_tools()
+    result = await asyncio.to_thread(
+        tools['official_monitor'].get_sources,
+        states=states,
+        roles=roles,
+        limit=min(max(limit, 1), 5000),
+        offset=max(offset, 0),
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool
+async def get_official_policy_changes(
+    view: str = "effective",
+    after_cursor: int = 0,
+    limit: int = 100,
+) -> str:
+    """查询已确认政策变化或变化事件流。
+
+    Args:
+        view: effective 返回当前有效变化，events 返回修订/撤销事件流。
+        after_cursor: 仅返回该游标之后的记录。
+        limit: 最大返回数量，范围 1-500。
+    """
+    tools = _get_tools()
+    result = await asyncio.to_thread(
+        tools['official_monitor'].get_policy_changes,
+        view=view,
+        after_cursor=max(after_cursor, 0),
+        limit=min(max(limit, 1), 500),
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool
+async def get_official_policy_change_digest(
+    start_date: str = "",
+    end_date: str = "",
+    entity_kind: str = "",
+    period: str = "",
+    limit: int = 10000,
+) -> str:
+    """按国家、地区或航司汇总具有完整证据链的有效政策变化。
+
+    Args:
+        start_date: 起始日期，格式 YYYY-MM-DD；留空表示不限制。
+        end_date: 结束日期，格式 YYYY-MM-DD；留空表示不限制。
+        entity_kind: country、airline、other 或留空返回全部。
+        period: daily、weekly、monthly、all 或留空；使用周期时不要再传日期。
+        limit: 扫描的有效修订数量，范围 1-10000。
+    """
+    tools = _get_tools()
+    result = await asyncio.to_thread(
+        tools["official_monitor"].get_policy_change_digest,
+        start_date=start_date,
+        end_date=end_date,
+        entity_kind=entity_kind,
+        period=period,
+        limit=min(max(limit, 1), 10000),
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool
+async def get_official_review_tasks(
+    statuses: Optional[List[str]] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> str:
+    """查询真实的人工复核任务，包括负责人、状态和恢复控制。"""
+    tools = _get_tools()
+    result = await asyncio.to_thread(
+        tools['official_monitor'].get_review_tasks,
+        statuses=statuses,
+        limit=min(max(limit, 1), 500),
+        offset=max(offset, 0),
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool
+async def get_official_knowledge_updates(
+    statuses: Optional[List[str]] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> str:
+    """查询知识库更新提案及其审批、应用或回滚状态。"""
+    tools = _get_tools()
+    result = await asyncio.to_thread(
+        tools['official_monitor'].get_knowledge_updates,
+        statuses=statuses,
+        limit=min(max(limit, 1), 500),
+        offset=max(offset, 0),
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool
+async def get_official_current_knowledge(limit: int = 500, offset: int = 0) -> str:
+    """查询已批准并实际应用的现行规则，以及对应修订和应用时间。"""
+    tools = _get_tools()
+    result = await asyncio.to_thread(
+        tools['official_monitor'].get_current_knowledge,
+        limit=min(max(limit, 1), 5000),
+        offset=max(offset, 0),
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 # ==================== 日期解析工具（优先调用）====================
@@ -1143,7 +1280,7 @@ def run_server(
         print("  协议: MCP over stdio (标准输入输出)")
         print("  说明: 通过标准输入输出与 MCP 客户端通信")
     elif transport == 'http':
-        print(f"  协议: MCP over HTTP (生产环境)")
+        print("  协议: MCP over HTTP (生产环境)")
         print(f"  服务器监听: {host}:{port}")
 
     if project_root:
@@ -1197,6 +1334,14 @@ def run_server(
     print("    24. get_channel_format_guide  - 获取渠道格式化策略指南（提示词）")
     print("    25. get_notification_channels - 获取已配置的通知渠道状态")
     print("    26. send_notification         - 向通知渠道发送消息（自动适配格式）")
+    print()
+    print("    === 官方来源监控 ===")
+    print("    27. get_official_sources          - 查询来源及生命周期状态")
+    print("    28. get_official_policy_changes   - 查询有效变化或修订事件流")
+    print("    29. get_official_policy_change_digest - 按国家/航司汇总有效变化")
+    print("    30. get_official_review_tasks     - 查询人工复核任务")
+    print("    31. get_official_knowledge_updates - 查询知识更新提案")
+    print("    32. get_official_current_knowledge - 查询已应用的现行规则")
     print("=" * 60)
     print()
 

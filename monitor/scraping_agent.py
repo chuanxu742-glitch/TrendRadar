@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-StepStatus = Literal["success", "retry", "terminal", "blocked"]
+StepStatus = Literal["success", "not_modified", "retry", "terminal", "blocked", "deferred"]
 
 
 def _now_iso() -> str:
@@ -24,18 +24,53 @@ def _safe_detail(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()[:300]
 
 
+def _is_browser_budget_entry(item: dict[str, Any]) -> bool:
+    attempts = item.get("attempts", [])
+    details = [
+        str(item.get("reason", "")),
+        str(item.get("failure_kind", "")),
+        str(item.get("last_failure_kind", "")),
+    ]
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if isinstance(attempt, dict):
+                details.extend((
+                    str(attempt.get("strategy", "")),
+                    str(attempt.get("failure_kind", "")),
+                    str(attempt.get("detail", "")),
+                ))
+    combined = " ".join(details).lower()
+    budget_kind = any(
+        detail.strip().lower() == "budget"
+        for detail in details
+    )
+    return (
+        "browser budget exhausted" in combined
+        or "browser capacity budget exhausted" in combined
+        or (
+            budget_kind
+            and any(term in combined for term in ("browser", "dynamic", "stealth"))
+        )
+        or (
+            "after budget" in combined
+            and ("dynamic" in combined or "stealth" in combined)
+        )
+    )
+
+
 def _manual_group_key(item: dict[str, Any]) -> str:
     host = str(item.get("site_key", "")).split("/", 1)[0].lower()
     attempts = item.get("attempts", [])
-    failure_kind = ""
+    failure_kind = str(item.get("failure_kind", ""))
     if isinstance(attempts, list) and attempts:
-        failure_kind = str(attempts[-1].get("failure_kind", ""))
+        failure_kind = failure_kind or str(attempts[-1].get("failure_kind", ""))
     if not failure_kind:
         reason = str(item.get("reason", "")).lower()
         failure_kind = next(
             (kind for kind in (
-                "human_verification", "authentication_required", "waf", "budget",
-                "javascript_shell", "incomplete_content", "network", "timeout",
+                "human_verification", "authentication_required", "access_forbidden",
+                "rate_limited", "server_error", "waf", "budget", "javascript_shell",
+                "incomplete_content", "network", "timeout",
             ) if kind in reason),
             "other",
         )
@@ -92,6 +127,7 @@ class StepResult:
     detail: str = ""
     suggested_strategies: tuple[str, ...] = ()
     metrics: dict[str, Any] = field(default_factory=dict)
+    retry_same_strategy: bool = False
 
 
 @dataclass
@@ -115,6 +151,7 @@ class AgentStateStore:
         self.profiles_path = directory / "site-profiles.json" if directory else None
         self.runs_path = directory / "runs.jsonl" if directory else None
         self.manual_path = directory / "manual-queue.json" if directory else None
+        self.deferred_path = directory / "deferred-queue.json" if directory else None
         self.status_path = directory / "status.json" if directory else None
 
     @staticmethod
@@ -301,7 +338,23 @@ class AgentStateStore:
         if self.manual_path is None:
             return 0
         queue = self._load(self.manual_path, [])
-        compacted = _compact_manual_entries(queue if isinstance(queue, list) else [])
+        queue = queue if isinstance(queue, list) else []
+        deferred = [dict(item) for item in queue if isinstance(item, dict) and _is_browser_budget_entry(item)]
+        if deferred:
+            archived = self._load(self.deferred_path, [])
+            archived = archived if isinstance(archived, list) else []
+            repaired_at = _now_iso()
+            archived.extend({
+                **item,
+                "state": "deferred",
+                "deferred_reason": "browser_capacity_budget_exhausted",
+                "reclassified_at": repaired_at,
+            } for item in deferred)
+            self._save(self.deferred_path, archived[-2000:])
+        compacted = _compact_manual_entries([
+            item for item in queue
+            if isinstance(item, dict) and not _is_browser_budget_entry(item)
+        ])
         self._save(self.manual_path, compacted)
         return len(compacted)
 
@@ -309,12 +362,42 @@ class AgentStateStore:
     def enqueue_manual(self, task_id: str, site_key: str, reason: str, attempts: list[dict[str, Any]]) -> None:
         if self.manual_path is None:
             return
+        if _is_browser_budget_entry({"reason": reason, "attempts": attempts}):
+            return
         queue = self._load(self.manual_path, [])
+        last_attempt = attempts[-1] if attempts else {}
+        actionable_attempt = next(
+            (
+                attempt for attempt in reversed(attempts)
+                if str(attempt.get("failure_kind", "")) not in {"", "budget"}
+            ),
+            last_attempt,
+        )
+        metrics = actionable_attempt.get("metrics", {}) if isinstance(actionable_attempt, dict) else {}
+        failure_kind = (
+            str(actionable_attempt.get("failure_kind", ""))
+            if isinstance(actionable_attempt, dict)
+            else ""
+        )
+        last_failure_kind = (
+            str(last_attempt.get("failure_kind", "")) if isinstance(last_attempt, dict) else ""
+        )
+        required_action = {
+            "human_verification": "authorized_human_verification",
+            "cloudflare_challenge": "authorized_human_verification",
+            "authentication_required": "authorized_authentication",
+            "access_forbidden": "review_access_policy",
+        }.get(failure_kind, "review_and_resume")
         item = {
             "task_id": task_id,
             "task_ids": [task_id],
             "site_key": site_key,
             "reason": _safe_detail(reason),
+            "state": "paused",
+            "failure_kind": failure_kind,
+            "last_failure_kind": last_failure_kind,
+            "status_code": metrics.get("status_code") if isinstance(metrics, dict) else None,
+            "required_action": required_action,
             "updated_at": _now_iso(),
             "attempts": attempts[-5:],
             "occurrences": 1,
@@ -333,8 +416,32 @@ class AgentLoop:
     def _choose_next(
         outcome: StepResult, allowed: tuple[str, ...], attempted: set[str]
     ) -> str:
+        if outcome.retry_same_strategy and outcome.strategy in allowed:
+            return outcome.strategy
         candidates = (*outcome.suggested_strategies, *allowed)
         return next((strategy for strategy in candidates if strategy in allowed and strategy not in attempted), "")
+
+    @staticmethod
+    def _invalid_success_reason(outcome: StepResult) -> str:
+        """Reject transport results that were incorrectly labelled as successful.
+
+        Generic AgentLoop users may omit HTTP metrics. Fetching users that provide
+        them must prove a usable 2xx response before learning a strategy or clearing
+        a paused task.
+        """
+        status_code = outcome.metrics.get("status_code")
+        if status_code is not None:
+            try:
+                code = int(status_code)
+            except (TypeError, ValueError):
+                return "invalid HTTP status metric"
+            if not 200 <= code < 300:
+                return f"HTTP {code} cannot be an agent success"
+        if outcome.metrics.get("complete") is False:
+            return "incomplete content cannot be an agent success"
+        if outcome.metrics.get("topic_matched") is False:
+            return "topic validation failure cannot be an agent success"
+        return ""
 
     def run(
         self,
@@ -356,6 +463,11 @@ class AgentLoop:
 
         for number in range(1, self.limits.max_attempts + 1):
             if time.monotonic() - started >= self.limits.max_duration_seconds:
+                if attempts and attempts[-1].get("failure_kind") == "budget":
+                    return LoopResult(
+                        "deferred", strategy, last_output, attempts,
+                        "browser capacity budget exhausted", last_error,
+                    )
                 reason = "agent time budget exhausted"
                 self.store.enqueue_manual(task_id, site_key, reason, attempts)
                 return LoopResult("blocked", strategy, last_output, attempts, reason, last_error)
@@ -369,6 +481,17 @@ class AgentLoop:
                     failure_kind=type(exc).__name__.lower(),
                     detail=str(exc),
                 )
+            if outcome.status == "success":
+                invalid_success = self._invalid_success_reason(outcome)
+                if invalid_success:
+                    outcome = StepResult(
+                        status="terminal",
+                        strategy=outcome.strategy,
+                        output=outcome.output,
+                        failure_kind="invalid_success",
+                        detail=invalid_success,
+                        metrics=outcome.metrics,
+                    )
             last_output = outcome.output if outcome.output is not None else last_output
             last_error = _safe_detail(outcome.detail)
             attempt = {
@@ -387,7 +510,10 @@ class AgentLoop:
                 self.store.promote(site_key, strategy, outcome.metrics)
                 self.store.resolve_manual(task_id)
                 return LoopResult("success", strategy, last_output, attempts)
-            self.store.record_failure(site_key, strategy, outcome.failure_kind)
+            if outcome.status == "not_modified":
+                return LoopResult("not_modified", strategy, last_output, attempts)
+            if outcome.failure_kind != "budget":
+                self.store.record_failure(site_key, strategy, outcome.failure_kind)
             if outcome.status == "terminal":
                 return LoopResult("terminal", strategy, last_output, attempts, last_error, last_error)
             if outcome.status == "blocked":
@@ -398,6 +524,11 @@ class AgentLoop:
             failure_counts[signature] = failure_counts.get(signature, 0) + 1
             if failure_counts[signature] >= self.limits.max_same_failure:
                 reason = f"same failure repeated {failure_counts[signature]} times"
+                if outcome.failure_kind == "budget":
+                    return LoopResult(
+                        "deferred", strategy, last_output, attempts,
+                        "browser capacity budget exhausted", last_error,
+                    )
                 self.store.enqueue_manual(task_id, site_key, reason, attempts)
                 return LoopResult("blocked", strategy, last_output, attempts, reason, last_error)
 
@@ -406,9 +537,19 @@ class AgentLoop:
                 reason = (
                     f"no untried strategy remains after {outcome.failure_kind}: {last_error}"
                 ).rstrip(": ")
+                if outcome.failure_kind == "budget":
+                    return LoopResult(
+                        "deferred", attempts[-1]["strategy"], last_output, attempts,
+                        "browser capacity budget exhausted", last_error,
+                    )
                 self.store.enqueue_manual(task_id, site_key, reason, attempts)
                 return LoopResult("blocked", attempts[-1]["strategy"], last_output, attempts, reason, last_error)
 
         reason = f"agent attempt budget exhausted; last error: {last_error}".rstrip(": ")
+        if attempts and attempts[-1].get("failure_kind") == "budget":
+            return LoopResult(
+                "deferred", strategy, last_output, attempts,
+                "browser capacity budget exhausted", last_error,
+            )
         self.store.enqueue_manual(task_id, site_key, reason, attempts)
         return LoopResult("blocked", strategy, last_output, attempts, reason, last_error)

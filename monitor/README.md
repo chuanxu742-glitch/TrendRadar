@@ -53,7 +53,7 @@
 - 每个域名及首级路径会记住最近验证成功的策略，后续优先复用，失败时自动回退到未尝试策略。
 - 新的动态或隐身策略先作为候选连续验证2次，之后才晋升为活跃适配器；活跃策略连续失败2次自动回滚上一版本。
 - 站点档案保存版本、置信度、模板指纹、完整性分数、候选策略和最近10个历史版本。
-- 相同失败重复、预算耗尽、需要登录或人机处理的任务进入`manual-queue.json`。
+- Agent 将相同失败、登录或人机处理停顿写入`manual-queue.json`作为抓取审计；只有绑定来源且带重试/恢复控制的记录才进入正式复核任务。浏览器容量耗尽只进入延后记录。
 - 尝试过程只记录策略、失败分类和指标，不保存页面正文、Cookie、验证码或API Key。
 - `robots.txt`、sitemap 和发现首页使用纯静态探测通道，不进入浏览器 Agent。
 - 人工任务按“域名 + 失败类型”合并并累计出现次数，避免同一官网生成重复记录。
@@ -87,13 +87,16 @@
 - `site-discovery.json`：每个官网最近一次发现结果。
 - `site-discovery-summary.json`：最近一轮官网发现统计。
 - `events.json` / `feed.xml`：内容变化、失效、恢复和页面迁移事件。
+- `/api/v1/policy-change-digest`：按国家、地区或航司汇总通过完整证据链校验的当前有效修订；支持`from`、`to`、`kind`、`period=daily|weekly|monthly`、`format=json|text|markdown`和`limit`查询参数。
+- `/api/brief.json`中的`policy_change_digest`：仪表盘“逐条变化 / 国家汇总”视图使用的结构化汇总及可复制中文文本。
+- `policy-digests/`：日报、周报、月报和 latest 的 JSON、纯文本、Markdown 原子快照；TrendRadar HTML 报告和通知渠道直接读取这些文件。
 - `snapshots/<source-id>/<timestamp>-<hash>/`：压缩原文、完整正文、元数据和差异。
 - `current/<source-id>.json`：每个来源最近一次验证通过的快照指针。
 - `scan-progress.json`：正在执行批次的心跳、当前来源和可恢复位置；批次完成后自动删除。
 - `state-journal.jsonl`：尚未合并进 `state.json` 的检查点记录；批次完成后自动清理。
 - `scraping-agent/site-profiles.json`：已验证的站点抓取策略记忆。
 - `scraping-agent/runs.jsonl`：不含正文和密钥的 Agent 尝试日志。
-- `scraping-agent/manual-queue.json`：预算耗尽或需要人工授权的任务。
+- `scraping-agent/manual-queue.json`：Agent 抓取暂停审计记录，不是正式复核任务；正式任务保存在 MonitorStore 的 `review_tasks`。
 
 ## 选择原则
 
@@ -103,3 +106,6 @@
 - 新页面不会直接覆盖旧页面；旧快照永久保留，注册表只移动当前指针。
 - 第三方聚合页可以作为历史证据监控，但不能替代航司官网当前页面。
 - 每批动态浏览器与隐身抓取都有硬限额；抓取 Agent 只在预定义策略中选择，语义 Agent 只总结确认后的变化。
+- 汇总中的发现时间、公告时间和生效时间保持独立；官网未明确说明的生效日期或官方原因显示为“未说明”，不会由模型推测。
+- 公告时间、生效时间和官方原因必须同时保存官网快照原句及来源地址；缺少来源字段时不会进入业务输出。
+- `MONITOR_POLICY_DIGEST_ENABLED=false`可关闭周期汇总生成作为发布回滚开关；生产合成门禁见`docs/policy-digest-release.md`。

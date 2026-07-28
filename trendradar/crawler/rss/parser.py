@@ -10,7 +10,7 @@ import html
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from email.utils import parsedate_to_datetime
 
 try:
@@ -30,6 +30,10 @@ class ParsedRSSItem:
     summary: Optional[str] = None
     author: Optional[str] = None
     guid: Optional[str] = None
+    change_id: Optional[str] = None
+    revision: Optional[int] = None
+    status: Optional[str] = None
+    supersedes: Optional[str] = None
 
 
 class RSSParser:
@@ -47,7 +51,7 @@ class RSSParser:
 
         self.max_summary_length = max_summary_length
 
-    def parse(self, content: str, feed_url: str = "") -> List[ParsedRSSItem]:
+    def parse(self, content: Union[str, bytes], feed_url: str = "") -> List[ParsedRSSItem]:
         """
         解析 RSS/Atom/JSON Feed 内容
 
@@ -76,12 +80,17 @@ class RSSParser:
 
         return items
 
-    def _is_json_feed(self, content: str) -> bool:
+    def _is_json_feed(self, content: Union[str, bytes]) -> bool:
         """
         检测内容是否为 JSON Feed 格式
 
         JSON Feed 必须包含 version 字段，值为 https://jsonfeed.org/version/1 或 1.1
         """
+        if isinstance(content, bytes):
+            try:
+                content = content.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                return False
         content = content.strip()
         if not content.startswith("{"):
             return False
@@ -93,7 +102,7 @@ class RSSParser:
         except (json.JSONDecodeError, TypeError):
             return False
 
-    def _parse_json_feed(self, content: str, feed_url: str = "") -> List[ParsedRSSItem]:
+    def _parse_json_feed(self, content: Union[str, bytes], feed_url: str = "") -> List[ParsedRSSItem]:
         """
         解析 JSON Feed 1.1 格式
 
@@ -106,6 +115,12 @@ class RSSParser:
         Returns:
             解析后的条目列表
         """
+        if isinstance(content, bytes):
+            try:
+                content = content.decode("utf-8-sig")
+            except UnicodeDecodeError as e:
+                raise ValueError(f"JSON Feed 编码错误 ({feed_url}): {e}") from e
+
         try:
             data = json.loads(content)
         except json.JSONDecodeError as e:
@@ -168,6 +183,7 @@ class RSSParser:
         # GUID
         guid = item_data.get("id", "") or url
 
+        metadata = self._change_metadata(item_data)
         return ParsedRSSItem(
             title=title,
             url=url,
@@ -175,6 +191,7 @@ class RSSParser:
             summary=summary or None,
             author=author,
             guid=guid,
+            **metadata,
         )
 
     def _parse_iso_date(self, date_str: str) -> Optional[str]:
@@ -211,7 +228,7 @@ class RSSParser:
         })
         response.raise_for_status()
 
-        return self.parse(response.text, url)
+        return self.parse(response.content, url)
 
     def _parse_entry(self, entry: Any) -> Optional[ParsedRSSItem]:
         """解析单个条目"""
@@ -248,6 +265,7 @@ class RSSParser:
         author = self._parse_author(entry)
         guid = entry.get("id") or entry.get("guid", {}).get("value") or url
 
+        metadata = self._change_metadata(entry)
         return ParsedRSSItem(
             title=title,
             url=url,
@@ -255,7 +273,58 @@ class RSSParser:
             summary=summary,
             author=author,
             guid=guid,
+            **metadata,
         )
+
+    @staticmethod
+    def _extension_value(data: Any, field: str) -> Any:
+        """读取普通字段或 feedparser 展平后的命名空间扩展字段。"""
+        if not hasattr(data, "items"):
+            return None
+
+        nested = data.get("_trendradar") or data.get("trendradar")
+        if isinstance(nested, dict) and field in nested:
+            return nested.get(field)
+
+        normalized_field = field.lower().replace("-", "_")
+        for raw_key, value in data.items():
+            key = str(raw_key).lower().replace(":", "_").replace("-", "_")
+            if key == normalized_field or key.endswith(f"_{normalized_field}"):
+                if isinstance(value, dict):
+                    return value.get("value") or value.get("text") or value.get("#text")
+                return value
+        return None
+
+    def _change_metadata(self, data: Any) -> Dict[str, Any]:
+        change_id = self._extension_value(data, "change_id")
+        revision_raw = self._extension_value(data, "revision")
+        status = self._extension_value(data, "status")
+        supersedes = self._extension_value(data, "supersedes")
+
+        def metadata_text(value: Any) -> str:
+            if isinstance(value, (list, tuple)):
+                return ",".join(filter(None, (metadata_text(part) for part in value)))
+            if isinstance(value, dict):
+                value = value.get("value") or value.get("text") or value.get("#text")
+            return str(value or "").strip()
+
+        revision_text = metadata_text(revision_raw)
+
+        try:
+            revision = int(revision_text) if revision_text else None
+        except (TypeError, ValueError):
+            revision = None
+
+        normalized_status = metadata_text(status).lower() or None
+        if normalized_status not in {None, "confirmed", "retracted", "superseded"}:
+            normalized_status = None
+
+        return {
+            "change_id": metadata_text(change_id) or None,
+            "revision": revision if revision and revision > 0 else None,
+            "status": normalized_status,
+            "supersedes": metadata_text(supersedes) or None,
+        }
 
     def _clean_text(self, text: str) -> str:
         """清理文本"""

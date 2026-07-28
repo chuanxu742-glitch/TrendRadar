@@ -17,6 +17,28 @@ from trendradar.utils.time import (
 )
 
 
+OFFICIAL_MONITOR_FEED_ID = "official-source-changes"
+BUSINESS_MONITOR_TITLE_PREFIXES = ("[政策变化]", "[数据源内容变化]")
+
+
+def is_reportable_rss_item(item: Dict[str, Any]) -> bool:
+    """Keep the authoritative change feed out of generic RSS report paths.
+
+    Confirmed official changes are delivered exclusively by the checkpoint-backed
+    official report group. Letting them through this generic path would replay
+    already-delivered revisions in current/daily reports.
+    """
+    return item.get("source_id") != OFFICIAL_MONITOR_FEED_ID
+
+
+def is_official_change_report_candidate(item: Dict[str, Any]) -> bool:
+    """Return whether an official-feed item is a user-facing change candidate."""
+    return (
+        item.get("source_id") == OFFICIAL_MONITOR_FEED_ID
+        and str(item.get("title", "")).startswith(BUSINESS_MONITOR_TITLE_PREFIXES)
+    )
+
+
 class AIFilterPipeline:
     """AI 筛选流水线，编排标签提取、批量分类、结果存储的完整流程"""
 
@@ -80,7 +102,7 @@ class AIFilterPipeline:
         effective_interests_file = configured_interests or "ai_interests.txt"
 
         if self._debug:
-            print(f"[AI筛选][DEBUG] === 配置信息 ===")
+            print("[AI筛选][DEBUG] === 配置信息 ===")
             print(f"[AI筛选][DEBUG] 存储后端: {self.storage.backend_name}")
             print(f"[AI筛选][DEBUG] batch_size={filter_config.get('BATCH_SIZE', 200)}, "
                   f"batch_interval={filter_config.get('BATCH_INTERVAL', 5)}")
@@ -158,7 +180,7 @@ class AIFilterPipeline:
         all_results = self.storage.get_active_ai_filter_results(interests_file=effective_interests_file)
 
         if self._debug:
-            print(f"[AI筛选][DEBUG] === 最终汇总 ===")
+            print("[AI筛选][DEBUG] === 最终汇总 ===")
             print(f"[AI筛选][DEBUG] 数据库 active 分类结果: {len(all_results)} 条")
             tag_counts: dict = {}
             for r in all_results:
@@ -198,7 +220,7 @@ class AIFilterPipeline:
         update_result = ai_filter.update_tags(old_tags, interests_content)
 
         if update_result is None:
-            print(f"[AI筛选] AI 标签更新失败，回退到重新提取")
+            print("[AI筛选] AI 标签更新失败，回退到重新提取")
             tags_data = ai_filter.extract_tags(interests_content)
             if not tags_data:
                 self.storage.end_batch()
@@ -288,6 +310,8 @@ class AIFilterPipeline:
 
             fresh_rss = []
             for n in all_rss:
+                if not is_reportable_rss_item(n):
+                    continue
                 published_at = n.get("published_at", "")
                 feed_id = n.get("source_id", "")
                 max_days = self._feed_max_age_map.get(feed_id, self._default_max_age_days)
@@ -447,6 +471,12 @@ class AIFilterPipeline:
                 "count": r.get("count", 1),
                 "relevance_score": r.get("relevance_score", 0),
                 "source_type": r.get("source_type", "hotlist"),
+                "summary": r.get("summary", ""),
+                "author": r.get("author", ""),
+                "change_id": r.get("change_id", ""),
+                "revision": r.get("revision", 0),
+                "status": r.get("status", ""),
+                "supersedes": r.get("supersedes", ""),
             })
             tag_groups[tag_name]["count"] += 1
 
@@ -512,6 +542,9 @@ class AIFilterPipeline:
             for item in items:
                 source_type = item.get("source_type", "hotlist")
 
+                if source_type == "rss" and not is_reportable_rss_item(item):
+                    continue
+
                 if mode == "current" and latest_time and source_type == "hotlist":
                     if item.get("last_time", "") != latest_time:
                         filtered_count += 1
@@ -568,6 +601,14 @@ class AIFilterPipeline:
                     "is_new": is_new,
                     "time_display": time_display,
                     "matched_keyword": tag_name,
+                    "source_id": item.get("source_id", ""),
+                    "summary": item.get("summary", ""),
+                    "author": item.get("author", ""),
+                    "relevance_score": item.get("relevance_score", 0),
+                    "change_id": item.get("change_id", ""),
+                    "revision": item.get("revision", 0),
+                    "status": item.get("status", ""),
+                    "supersedes": item.get("supersedes", ""),
                 }
 
                 if source_type == "rss":
@@ -616,8 +657,12 @@ class AIFilterPipeline:
                 parts.append(f"RSS {rss_kept} 条")
             print(f"[AI筛选] 分数过滤：min_score={min_score}，保留 {total_kept} 条 score≥{min_score} ({', '.join(parts)})")
 
-        sort_key_priority = lambda x: (x.get("position", 9999), -x["count"], x["word"])
-        sort_key_count = lambda x: (-x["count"], x.get("position", 9999), x["word"])
+        def sort_key_priority(item):
+            return (item.get("position", 9999), -item["count"], item["word"])
+
+        def sort_key_count(item):
+            return (-item["count"], item.get("position", 9999), item["word"])
+
         sort_key = sort_key_priority if self._priority_sort_enabled else sort_key_count
         hotlist_stats.sort(key=sort_key)
         rss_stats.sort(key=sort_key)

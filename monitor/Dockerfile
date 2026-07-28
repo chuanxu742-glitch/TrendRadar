@@ -12,4 +12,6 @@ RUN apt-get update \
     && /app/.venv/bin/python -m ensurepip \
     && /app/.venv/bin/python -m pip install --no-cache-dir \
         "scrapling[fetchers]==0.4.10" \
+        "pypdf==6.14.2" \
+        "tzdata==2025.2" \
     && /app/.venv/bin/scrapling install

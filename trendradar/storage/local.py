@@ -201,13 +201,18 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
 
     def save_rss_data(self, data: RSSData) -> bool:
         """保存 RSS 数据到 SQLite"""
-        success, new_count, updated_count = self._save_rss_data_impl(data, "[本地存储]")
+        success, new_count, updated_count, deactivated_count, ai_state_changed_count = \
+            self._save_rss_data_impl(data, "[本地存储]")
 
         if success:
             # 输出统计日志
             log_parts = [f"[本地存储] RSS 处理完成：新增 {new_count} 条"]
             if updated_count > 0:
                 log_parts.append(f"更新 {updated_count} 条")
+            if deactivated_count > 0:
+                log_parts.append(f"停用 {deactivated_count} 条")
+            if ai_state_changed_count > 0:
+                log_parts.append(f"同步 AI 状态 {ai_state_changed_count} 条")
             print("，".join(log_parts))
 
         return success
@@ -219,6 +224,13 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
     def detect_new_rss_items(self, current_data: RSSData) -> Dict[str, List[RSSItem]]:
         """检测新增的 RSS 条目"""
         return self._detect_new_rss_items_impl(current_data)
+
+    def acknowledge_official_changes(
+        self,
+        change_revisions: List[tuple[str, int]],
+    ) -> bool:
+        """仅在报告或通知成功后确认官网变化已交付。"""
+        return self._acknowledge_official_changes_impl(change_revisions)
 
     def get_latest_rss_data(self, date: Optional[str] = None) -> Optional[RSSData]:
         """获取最新一次抓取的 RSS 数据"""

@@ -140,11 +140,13 @@ def count_word_frequency(
 
     # 默认时间转换函数
     if convert_time_func is None:
-        convert_time_func = lambda x: x
+        def convert_time_func(value):
+            return value
 
     # 默认首次爬取检测函数
     if is_first_crawl_func is None:
-        is_first_crawl_func = lambda: True
+        def is_first_crawl_func():
+            return True
 
     # 如果没有配置词组，创建一个包含所有新闻的虚拟词组
     if not word_groups:
@@ -573,7 +575,7 @@ def count_rss_frequency(
         word_stats[group_key] = {"count": 0, "titles": []}
 
     total_items = len(rss_items)
-    processed_urls = set()  # 用于去重
+    processed_keys = set()  # 结构化变化优先按 change_id 去重，普通 RSS 按 URL 去重
 
     # 为每个条目分配一个基于发布时间的"排名"
     # 按发布时间排序，最新的排在前面
@@ -582,17 +584,21 @@ def count_rss_frequency(
         key=lambda x: x.get("published_at", ""),
         reverse=True
     )
-    url_to_rank = {item.get("url", ""): idx + 1 for idx, item in enumerate(sorted_items)}
+    key_to_rank = {
+        item.get("change_id") or item.get("url", ""): idx + 1
+        for idx, item in enumerate(sorted_items)
+    }
 
     for item in rss_items:
         title = item.get("title", "")
         url = item.get("url", "")
+        item_key = item.get("change_id") or url
 
         # 去重
-        if url and url in processed_urls:
+        if item_key and item_key in processed_keys:
             continue
-        if url:
-            processed_urls.add(url)
+        if item_key:
+            processed_keys.add(item_key)
 
         # 使用统一的匹配逻辑
         if not matches_word_groups(title, word_groups, filter_words, global_filters):
@@ -640,11 +646,12 @@ def count_rss_frequency(
                 is_new = url in new_urls if url else False
 
                 # 获取排名（基于发布时间顺序）
-                rank = url_to_rank.get(url, 99) if url else 99
+                rank = key_to_rank.get(item_key, 99) if item_key else 99
 
                 title_data = {
                     "title": title,
                     "source_name": item.get("feed_name", item.get("feed_id", "RSS")),
+                    "source_id": item.get("feed_id", ""),
                     "time_display": time_display,
                     "count": 1,  # RSS 条目通常只出现一次
                     "ranks": [rank],
@@ -652,6 +659,12 @@ def count_rss_frequency(
                     "url": url,
                     "mobile_url": "",
                     "is_new": is_new,
+                    "summary": item.get("summary", ""),
+                    "author": item.get("author", ""),
+                    "change_id": item.get("change_id", ""),
+                    "revision": item.get("revision", 0),
+                    "status": item.get("status", ""),
+                    "supersedes": item.get("supersedes", ""),
                 }
                 word_stats[group_key]["titles"].append(title_data)
                 break  # 一个条目只匹配第一个词组

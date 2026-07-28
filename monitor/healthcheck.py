@@ -20,24 +20,42 @@ def parse_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def functional_status(payload: dict) -> str:
+    health = payload.get("functional_health", {})
+    if isinstance(health, str):
+        return health
+    if isinstance(health, dict):
+        return str(health.get("status", ""))
+    return ""
+
+
 def main() -> int:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/", timeout=5) as response:
-            if response.status != 200:
-                return 1
+        for path in ("/health/live", "/health/ready", "/api/v1/policy-change-digest?period=daily"):
+            with urllib.request.urlopen(f"http://127.0.0.1:{PORT}{path}", timeout=5) as response:
+                if response.status != 200:
+                    return 1
     except Exception:
         return 1
 
     progress_path = STATE_DIR / "scan-progress.json"
     status_path = STATE_DIR / "status.json"
-    target = progress_path if progress_path.exists() else status_path
-    if not target.exists():
+    heartbeat_path = progress_path if progress_path.exists() else status_path
+    if not heartbeat_path.exists():
         return 1
     try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-        timestamp = payload.get("last_progress_at") or payload.get("generated_at")
+        heartbeat = read_json(heartbeat_path)
+        timestamp = heartbeat.get("last_progress_at") or heartbeat.get("generated_at")
         age = (datetime.now(timezone.utc) - parse_time(timestamp)).total_seconds()
-        return 0 if age <= MAX_STALE_SECONDS else 1
+        if age > MAX_STALE_SECONDS:
+            return 1
+        if status_path.exists() and functional_status(read_json(status_path)) == "unhealthy":
+            return 1
+        return 0
     except Exception:
         return 1
 

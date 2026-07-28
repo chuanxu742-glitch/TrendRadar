@@ -1,0 +1,463 @@
+# coding=utf-8
+"""
+官方监控 HTTP API
+
+从 official_monitor.py 拆分出来的 HTTP 请求处理器：仪表盘页面、REST 查询接口、
+审核/知识库操作接口。业务逻辑仍由 official_monitor 模块提供，这里只负责路由与协议细节。
+"""
+
+import json
+import re
+import importlib
+import sys
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from types import ModuleType
+from typing import Any
+from urllib.parse import parse_qsl, unquote, urlsplit
+
+
+class _OfficialMonitorProxy:
+    def __init__(self) -> None:
+        self.module: ModuleType | None = None
+
+    def bind(self, module: ModuleType) -> None:
+        self.module = module
+
+    def __getattr__(self, name: str) -> Any:
+        if self.module is None:
+            main_module = sys.modules.get("__main__")
+            if main_module is not None and hasattr(main_module, "STATE_DIR"):
+                self.module = main_module
+            else:
+                package = __package__
+                module_name = f"{package}.official_monitor" if package else "official_monitor"
+                self.module = importlib.import_module(module_name)
+        return getattr(self.module, name)
+
+
+om = _OfficialMonitorProxy()
+
+
+def bind_monitor_module(module: ModuleType) -> None:
+    om.bind(module)
+
+
+class MonitorRequestHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, directory=str(om.STATE_DIR), **kwargs)
+
+    def send_bytes(self, content: bytes, content_type: str, status: int = 200) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(content)
+
+    def send_json(self, payload: Any, status: int = 200) -> None:
+        self.send_bytes(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            status,
+        )
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        if path in {"/", "/dashboard", "/dashboard.html"}:
+            try:
+                self.send_bytes(om.DASHBOARD_PATH.read_bytes(), "text/html; charset=utf-8")
+            except OSError as exc:
+                self.send_error(500, f"dashboard unavailable: {exc}")
+            return
+        if path == "/api/overview.json":
+            try:
+                content = json.dumps(om.dashboard_payload(), ensure_ascii=False).encode("utf-8")
+                self.send_bytes(content, "application/json; charset=utf-8")
+            except Exception as exc:
+                self.send_error(500, f"overview unavailable: {exc}")
+            return
+        if path == "/api/brief.json":
+            try:
+                content = json.dumps(om.business_brief_payload(), ensure_ascii=False).encode("utf-8")
+                self.send_bytes(content, "application/json; charset=utf-8")
+            except Exception as exc:
+                self.send_error(500, f"brief unavailable: {exc}")
+            return
+        if path == "/api/v1/policy-change-digest":
+            try:
+                query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
+                limit = min(max(int(query.get("limit", "10000") or 10000), 1), 10000)
+                output_format = str(query.get("format") or "json").strip().lower()
+                if output_format not in {"json", "text", "markdown", "md"}:
+                    raise ValueError("format must be json, text, markdown, or md")
+                digest = om.policy_change_digest_payload(
+                    start_date=query.get("from", ""),
+                    end_date=query.get("to", ""),
+                    entity_kind=query.get("kind", ""),
+                    period=query.get("period", ""),
+                    limit=limit,
+                )
+                if output_format == "json":
+                    self.send_json(digest)
+                elif output_format == "text":
+                    self.send_bytes(
+                        str(digest["text"]).encode("utf-8"),
+                        "text/plain; charset=utf-8",
+                    )
+                else:
+                    self.send_bytes(
+                        str(digest["markdown"]).encode("utf-8"),
+                        "text/markdown; charset=utf-8",
+                    )
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+        if path == "/api/v1/policy-changes":
+            try:
+                query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
+                after = max(int(query.get("after", "0") or 0), 0)
+                limit = min(max(int(query.get("limit", "100") or 100), 1), 500)
+                store = om.monitor_store()
+                current_cursor = store.get_change_cursor()
+                if query.get("view") == "effective":
+                    items = store.list_effective_policy_changes(after_cursor=after, limit=limit)
+                    count = store.count_effective_policy_changes()
+                    remaining_count = store.count_effective_policy_changes(after_cursor=after)
+                else:
+                    events = store.read_change_feed(after_cursor=after, limit=limit)
+                    items = [
+                        {
+                            "cursor": event.cursor,
+                            "event_type": event.event_type,
+                            "occurred_at": event.occurred_at,
+                            **dict(event.payload),
+                        }
+                        for event in events
+                    ]
+                    count = store.count_change_feed()
+                    remaining_count = store.count_change_feed(after_cursor=after)
+                has_more = remaining_count > len(items)
+                next_cursor = (
+                    int(items[-1]["cursor"])
+                    if has_more and items
+                    else max(after, current_cursor)
+                )
+                self.send_json({
+                    "items": items,
+                    "count": count,
+                    "page_count": len(items),
+                    "remaining_count": remaining_count,
+                    "next_cursor": next_cursor,
+                    "current_cursor": current_cursor,
+                    "has_more": has_more,
+                    "limit": limit,
+                })
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+        if path == "/api/v1/sources":
+            try:
+                query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
+                states = tuple(filter(None, query.get("state", "").split(",")))
+                roles = tuple(filter(None, query.get("role", "").split(",")))
+                limit = min(max(int(query.get("limit", "500") or 500), 1), 5000)
+                offset = max(int(query.get("offset", "0") or 0), 0)
+                store = om.monitor_store()
+                items = store.list_sources(
+                    states=states, roles=roles, limit=limit, offset=offset
+                )
+                count = store.count_sources(states=states, roles=roles)
+                next_offset = offset + len(items)
+                has_more = next_offset < count
+                self.send_json({
+                    "items": [om.source_api_item(item) for item in items],
+                    "count": count,
+                    "page_count": len(items),
+                    "offset": offset,
+                    "limit": limit,
+                    "next_offset": next_offset if has_more else None,
+                    "has_more": has_more,
+                })
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+        if path == "/api/v1/review-tasks":
+            try:
+                query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
+                statuses = tuple(filter(None, query.get("status", "open,assigned,in_progress").split(",")))
+                limit = min(max(int(query.get("limit", "100") or 100), 1), 500)
+                offset = max(int(query.get("offset", "0") or 0), 0)
+                store = om.monitor_store()
+                items = store.list_review_tasks(
+                    statuses=statuses, limit=limit, offset=offset
+                )
+                count = store.count_review_tasks(statuses=statuses)
+                next_offset = offset + len(items)
+                has_more = next_offset < count
+                self.send_json({
+                    "items": [om.review_api_item(item) for item in items],
+                    "count": count,
+                    "page_count": len(items),
+                    "offset": offset,
+                    "limit": limit,
+                    "next_offset": next_offset if has_more else None,
+                    "has_more": has_more,
+                })
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+        if path == "/api/v1/knowledge-updates":
+            try:
+                query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
+                statuses = tuple(filter(None, query.get("status", "proposed,approved").split(",")))
+                limit = min(max(int(query.get("limit", "100") or 100), 1), 500)
+                offset = max(int(query.get("offset", "0") or 0), 0)
+                store = om.monitor_store()
+                items = store.list_knowledge_update_proposals(
+                    statuses=statuses, limit=limit, offset=offset
+                )
+                count = store.count_knowledge_update_proposals(statuses=statuses)
+                next_offset = offset + len(items)
+                has_more = next_offset < count
+                self.send_json({
+                    "items": [om.knowledge_update_api_item(item) for item in items],
+                    "count": count,
+                    "page_count": len(items),
+                    "offset": offset,
+                    "limit": limit,
+                    "next_offset": next_offset if has_more else None,
+                    "has_more": has_more,
+                })
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+        if path == "/api/v1/knowledge-current":
+            try:
+                query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
+                limit = min(max(int(query.get("limit", "500") or 500), 1), 5000)
+                offset = max(int(query.get("offset", "0") or 0), 0)
+                all_items = om.materialized_knowledge_inventory()
+                items = all_items[offset:offset + limit]
+                count = len(all_items)
+                next_offset = offset + len(items)
+                has_more = next_offset < count
+                self.send_json({
+                    "items": items,
+                    "count": count,
+                    "page_count": len(items),
+                    "offset": offset,
+                    "limit": limit,
+                    "next_offset": next_offset if has_more else None,
+                    "has_more": has_more,
+                })
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+        if path in {"/health/live", "/health/ready", "/health/functional"}:
+            health = om.load_json(om.STATE_DIR / "status.json", {}).get("functional_health", {})
+            if path == "/health/live":
+                self.send_json({"status": "ok", "time": om.now_iso()})
+            elif path == "/health/ready":
+                ready = (om.STATE_DIR / "status.json").exists() and om.monitor_store().journal_mode() in {"wal", "memory"}
+                self.send_json({"status": "ready" if ready else "not_ready"}, 200 if ready else 503)
+            else:
+                status = str(health.get("status") or "unknown")
+                self.send_json(health or {"status": status}, 503 if status == "unhealthy" else 200)
+            return
+        if path in {"/feed.xml", "/ops-feed.xml"}:
+            try:
+                content = (om.STATE_DIR / path.removeprefix("/")).read_bytes()
+                response_status = 200
+                if path == "/feed.xml":
+                    status_payload = om.load_json(om.STATE_DIR / "status.json", {})
+                    functional_health = (
+                        status_payload.get("functional_health", {})
+                        if isinstance(status_payload, dict)
+                        else {}
+                    )
+                    functional_status = (
+                        functional_health.get("status", "")
+                        if isinstance(functional_health, dict)
+                        else functional_health
+                    )
+                    if str(functional_status).strip().lower() == "unhealthy":
+                        response_status = 503
+                self.send_bytes(
+                    content,
+                    "application/rss+xml; charset=utf-8",
+                    response_status,
+                )
+            except OSError as exc:
+                self.send_error(404, f"feed unavailable: {exc}")
+            return
+        super().do_GET()
+
+    def _read_json_body(self) -> dict[str, Any]:
+        length = min(max(int(self.headers.get("Content-Length", "0") or 0), 0), 64 * 1024)
+        if not length:
+            return {}
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("request body must be a JSON object")
+        return payload
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        try:
+            payload = self._read_json_body()
+            actor = str(payload.get("actor") or "local-operator")
+            review_match = re.fullmatch(r"/api/v1/review-tasks/([^/]+)/actions", path)
+            if review_match:
+                task_id = unquote(review_match.group(1))
+                action = str(payload.get("action") or "").lower()
+                task = om.monitor_store().get_review_task(task_id)
+                requested_owner = str(payload.get("owner") or "") or None
+                owner = requested_owner or task.owner
+                resolution = str(payload.get("resolution") or "") or None
+                if action == "assign":
+                    task = om.monitor_store().transition_review_task(
+                        task_id, "assigned", actor=actor, owner=requested_owner or actor,
+                    )
+                elif action == "start":
+                    task = om.monitor_store().transition_review_task(
+                        task_id, "in_progress", actor=actor, owner=requested_owner or actor,
+                    )
+                elif action == "retry":
+                    if task.task_type == "source_recovery" and task.source_id:
+                        om.schedule_source_revalidation(
+                            task.source_id,
+                            actor=actor,
+                            reason=resolution or "review retry requested",
+                        )
+                        resume_action = "revalidate_source"
+                    elif task.task_type == "change_evidence":
+                        om.update_candidate_from_review(
+                            task,
+                            state="gathering_evidence",
+                            actor=actor,
+                            reason=resolution or "evidence enrichment requested",
+                        )
+                        resume_action = "enrich_evidence"
+                    else:
+                        raise ValueError("review task cannot be retried automatically")
+                    task = om.monitor_store().transition_review_task(
+                        task_id,
+                        "open",
+                        actor=actor,
+                        owner=owner,
+                        resume_action=resume_action,
+                        retry_after=om.now_iso(),
+                    )
+                elif action == "resume":
+                    if task.task_type != "source_recovery" or not task.source_id:
+                        raise ValueError("resume is only valid for a source recovery task")
+                    om.schedule_source_revalidation(
+                        task.source_id,
+                        actor=actor,
+                        reason=resolution or "review resume requested",
+                    )
+                    task = om.monitor_store().transition_review_task(
+                        task_id, "in_progress", actor=actor, owner=requested_owner or actor,
+                        resume_action="revalidate_source", retry_after=om.now_iso(),
+                    )
+                elif action == "reactivate":
+                    if task.task_type != "source_recovery" or not task.source_id:
+                        raise ValueError("reactivate is only valid for a source recovery task")
+                    if not resolution:
+                        raise ValueError("reactivate requires an operator resolution")
+                    endpoint = om.monitor_store().reactivate_source(
+                        task.source_id, actor=actor, reason=resolution, next_due_at=om.now_iso(),
+                    )
+                    om.mark_source_pending_revalidation(endpoint)
+                    task = om.monitor_store().transition_review_task(
+                        task_id, "open", actor=actor, owner=owner,
+                        resume_action="revalidate_source", retry_after=om.now_iso(),
+                    )
+                elif action == "retire":
+                    if task.task_type != "source_recovery" or not task.source_id:
+                        raise ValueError("retire is only valid for a source recovery task")
+                    om.monitor_store().transition_source(
+                        task.source_id, "retired", reason=resolution or task.reason, force=True,
+                    )
+                    task = om.monitor_store().transition_review_task(
+                        task_id, "resolved", actor=actor, owner=owner,
+                        resolution=resolution or "source retired", resume_action="retire_source",
+                    )
+                elif action in {"resolve", "reject"}:
+                    if task.task_type == "change_evidence":
+                        candidate_state = str(payload.get("candidate_state") or "").lower()
+                        if action == "reject":
+                            candidate_state = "rejected"
+                        if candidate_state not in {"confirmed", "rejected"}:
+                            raise ValueError(
+                                "resolving change evidence requires candidate_state confirmed or rejected"
+                            )
+                        reviewed_candidate = om.update_candidate_from_review(
+                            task,
+                            state=candidate_state,
+                            actor=actor,
+                            reason=resolution or action,
+                        )
+                        if candidate_state == "confirmed":
+                            om.publish_confirmed_candidate(reviewed_candidate, actor=actor)
+                        else:
+                            om.reject_candidate_change(
+                                reviewed_candidate,
+                                actor=actor,
+                                reason=resolution or action,
+                            )
+                    task = om.monitor_store().transition_review_task(
+                        task_id, "resolved", actor=actor, owner=owner,
+                        resolution=resolution or action,
+                    )
+                else:
+                    raise ValueError("unsupported review action")
+                self.send_json(om.review_api_item(task))
+                return
+            proposal_match = re.fullmatch(r"/api/v1/knowledge-updates/([^/]+)/actions", path)
+            if proposal_match:
+                proposal_id = unquote(proposal_match.group(1))
+                action = str(payload.get("action") or "").lower()
+                owner = str(payload.get("owner") or actor)
+                reason = str(payload.get("reason") or "") or None
+                if action == "apply":
+                    current, materialized_path = om.apply_knowledge_proposal(
+                        proposal_id, actor=owner, reason=reason,
+                    )
+                elif action == "rollback":
+                    current, materialized_path = om.rollback_knowledge_proposal(
+                        proposal_id, actor=owner, reason=reason,
+                    )
+                elif action in {"approve", "reject"}:
+                    with om.KNOWLEDGE_OPERATION_LOCK:
+                        current = om.monitor_store().get_knowledge_update_proposal(proposal_id)
+                        if action == "approve":
+                            revision = om.monitor_store().get_policy_change_revision(
+                                current.policy_change_revision_id
+                            )
+                            if revision.status != "confirmed":
+                                raise ValueError("knowledge update revision is no longer effective")
+                        current = om.monitor_store().transition_knowledge_update_proposal(
+                            proposal_id,
+                            "approved" if action == "approve" else "rejected",
+                            owner=owner,
+                            reason=reason,
+                        )
+                    materialized_path = None
+                else:
+                    raise ValueError("unsupported knowledge update action")
+                response = om.knowledge_update_api_item(current)
+                if materialized_path is not None:
+                    response["materialized_path"] = materialized_path.relative_to(om.STATE_DIR.resolve()).as_posix()
+                self.send_json(response)
+                return
+            self.send_json({"error": "not found"}, 404)
+        except KeyError as exc:
+            self.send_json({"error": f"not found: {exc}"}, 404)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            self.send_json({"error": str(exc)}, 400)
+
+
+def serve() -> None:
+    ThreadingHTTPServer(("0.0.0.0", om.PORT), MonitorRequestHandler).serve_forever()

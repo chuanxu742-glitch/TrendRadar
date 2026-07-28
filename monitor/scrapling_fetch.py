@@ -101,13 +101,26 @@ def completeness_metrics(
     minimum_visible_chars: int,
 ) -> dict[str, Any]:
     content_type = result.headers.get("Content-Type", "").lower()
-    is_html = "html" in content_type or "xml" in content_type
-    effective_expect_topic = expect_topic and is_html
-    topic_matched = (
-        contains_expected_topic(preview, topic_terms)
-        if effective_expect_topic and topic_terms
-        else True
+    prefix = result.content[:512].lstrip().lower()
+    is_html = (
+        "html" in content_type
+        or "xml" in content_type
+        or prefix.startswith((b"<!doctype html", b"<html", b"<?xml"))
     )
+    known_binary = any(
+        marker in content_type
+        for marker in ("pdf", "octet-stream", "zip", "msword", "officedocument")
+    ) or b"\x00" in prefix
+    is_textual = (
+        is_html
+        or content_type.startswith("text/")
+        or "json" in content_type
+        or (not content_type and not known_binary)
+    )
+    effective_expect_topic = expect_topic and is_textual
+    topic_matched = True
+    if effective_expect_topic:
+        topic_matched = bool(topic_terms) and contains_expected_topic(preview, topic_terms)
     visible_size = len(preview) if is_html else len(result.content)
     minimum = max(minimum_visible_chars, 1)
     score = 20 if 200 <= result.status_code < 300 else 0
@@ -122,7 +135,11 @@ def completeness_metrics(
         if topic_matched:
             score += 25
         else:
-            reasons.append("expected policy topic missing")
+            reasons.append(
+                "expected policy topic missing"
+                if topic_terms
+                else "topic validation requested without configured terms"
+            )
     else:
         score += 15
     lowered = result.content[:500_000].decode("utf-8", errors="ignore").lower()
@@ -153,14 +170,73 @@ class FetchResult:
     content: bytes
     mode: str
     escalation_reason: str = ""
+    validation_error: str = ""
+    failure_kind: str = ""
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise RuntimeError(f"HTTP {self.status_code} for {self.url}")
+        if self.validation_error:
+            raise BrowserFetchError(
+                self.validation_error,
+                failure_kind=self.failure_kind,
+                status_code=self.status_code,
+            )
 
 
 class BrowserFetchError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: str = "",
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+        self.status_code = status_code
+
+
+class BrowserFetchBudget:
+    """Thread-safe attempt budget that can be shared by many fetcher instances.
+
+    The limits are total browser launches for the lifetime of this object, not
+    concurrency limits. Call ``reset`` at an explicit scheduling-cycle boundary.
+    Existing callers that do not provide a budget keep per-fetcher limits.
+    """
+
+    def __init__(self, dynamic_limit: int = 5, stealth_limit: int = 2) -> None:
+        self.dynamic_limit = max(int(dynamic_limit), 0)
+        self.stealth_limit = max(int(stealth_limit), 0)
+        self._dynamic_used = 0
+        self._stealth_used = 0
+        self._lock = threading.Lock()
+
+    def try_consume(self, mode: str) -> bool:
+        if mode not in {"dynamic", "stealth"}:
+            raise ValueError(f"unsupported browser budget mode: {mode}")
+        used_name = f"_{mode}_used"
+        limit = self.dynamic_limit if mode == "dynamic" else self.stealth_limit
+        with self._lock:
+            used = int(getattr(self, used_name))
+            if used >= limit:
+                return False
+            setattr(self, used_name, used + 1)
+            return True
+
+    def snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "dynamic_used": self._dynamic_used,
+                "dynamic_limit": self.dynamic_limit,
+                "stealth_used": self._stealth_used,
+                "stealth_limit": self.stealth_limit,
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._dynamic_used = 0
+            self._stealth_used = 0
 
 
 def _result(page: Any, mode: str, reason: str = "") -> FetchResult:
@@ -199,9 +275,11 @@ class ScraplingAdaptiveFetcher:
         agent_max_duration: int = 180,
         dynamic_semaphore: threading.Semaphore | None = None,
         stealth_semaphore: threading.Semaphore | None = None,
+        browser_budget: BrowserFetchBudget | None = None,
     ) -> None:
-        self.dynamic_limit = dynamic_limit
-        self.stealth_limit = stealth_limit
+        self.browser_budget = browser_budget or BrowserFetchBudget(dynamic_limit, stealth_limit)
+        self.dynamic_limit = self.browser_budget.dynamic_limit
+        self.stealth_limit = self.browser_budget.stealth_limit
         self.browser_hard_timeout = max(browser_hard_timeout, 15)
         self.cloudflare_solver_enabled = cloudflare_solver_enabled
         self.cloudflare_timeout = max(cloudflare_timeout, 60)
@@ -359,18 +437,19 @@ class ScraplingAdaptiveFetcher:
         task_id = f"fetch:{site_key}:{hashlib.sha256(url.encode()).hexdigest()[:12]}"
 
         def execute(strategy: str, _: int) -> StepResult:
+            used_cloudflare_solver = False
             try:
                 if strategy == "static":
                     page = Fetcher.get(
                         url,
                         impersonate="chrome",
                         timeout=timeout,
-                        retries=1,
+                        retries=0,
                         headers=headers or None,
                     )
                     result = _result(page, "static")
                 elif strategy == "dynamic":
-                    if self.dynamic_used >= self.dynamic_limit:
+                    if not self.browser_budget.try_consume("dynamic"):
                         return StepResult(
                             "retry", strategy, failure_kind="budget",
                             detail="dynamic browser budget exhausted",
@@ -383,7 +462,7 @@ class ScraplingAdaptiveFetcher:
                         with self.dynamic_semaphore:
                             result = self._browser_fetch("dynamic", url, timeout, "agent:dynamic")
                 elif strategy == "stealth":
-                    if self.stealth_used >= self.stealth_limit:
+                    if not self.browser_budget.try_consume("stealth"):
                         return StepResult(
                             "retry", strategy, failure_kind="budget",
                             detail="stealth browser budget exhausted",
@@ -391,6 +470,7 @@ class ScraplingAdaptiveFetcher:
                         )
                     self.stealth_used += 1
                     solve_cloudflare = self.cloudflare_solver_enabled
+                    used_cloudflare_solver = solve_cloudflare
                     if solve_cloudflare:
                         self.cloudflare_attempts += 1
                     try:
@@ -407,8 +487,6 @@ class ScraplingAdaptiveFetcher:
                         if solve_cloudflare:
                             self.cloudflare_failures += 1
                         raise
-                    if solve_cloudflare:
-                        self.cloudflare_fetch_successes += 1
                 else:
                     return StepResult("terminal", strategy, failure_kind="strategy", detail="unknown strategy")
             except Exception as exc:
@@ -427,7 +505,7 @@ class ScraplingAdaptiveFetcher:
                 )
 
             if result.status_code == 304:
-                return StepResult("success", strategy, output=result, metrics={"status_code": 304})
+                return StepResult("not_modified", strategy, output=result, metrics={"status_code": 304})
             preview = visible_text(result.content)
             lowered = result.content[:200_000].decode("utf-8", errors="ignore").lower()
             waf = (
@@ -466,6 +544,16 @@ class ScraplingAdaptiveFetcher:
                 "content_bytes": len(result.content),
                 "visible_chars": len(preview),
             }
+            if result.status_code == 404:
+                return StepResult(
+                    "terminal", strategy, output=result, failure_kind="http_not_found",
+                    detail="HTTP 404 page not found", metrics=metrics,
+                )
+            if result.status_code == 410:
+                return StepResult(
+                    "terminal", strategy, output=result, failure_kind="http_gone",
+                    detail="HTTP 410 resource gone", metrics=metrics,
+                )
             if captcha:
                 if cloudflare_challenge and strategy != "stealth":
                     return StepResult(
@@ -483,11 +571,40 @@ class ScraplingAdaptiveFetcher:
                     "blocked", strategy, output=result, failure_kind="authentication_required",
                     detail="authentication checkpoint requires an authorized handler", metrics=metrics,
                 )
-            if waf:
+            if result.status_code == 403 and strategy == "stealth":
                 return StepResult(
-                    "retry", strategy, output=result, failure_kind="waf",
+                    "blocked", strategy, output=result, failure_kind="access_forbidden",
+                    detail="HTTP 403 remained after the authorized recovery strategy",
+                    metrics=metrics,
+                )
+            if result.status_code == 429:
+                return StepResult(
+                    "retry", strategy, output=result, failure_kind="rate_limited",
+                    detail="HTTP 429 rate limited", retry_same_strategy=True, metrics=metrics,
+                )
+            if 500 <= result.status_code < 600 and not waf:
+                return StepResult(
+                    "retry", strategy, output=result, failure_kind="server_error",
+                    detail=f"HTTP {result.status_code} server error",
+                    retry_same_strategy=True, metrics=metrics,
+                )
+            if waf:
+                if strategy == "stealth":
+                    return StepResult(
+                        "blocked", strategy, output=result, failure_kind="waf",
+                        detail="WAF remained after the authorized recovery strategy",
+                        metrics=metrics,
+                    )
+                return StepResult(
+                    "retry", strategy, output=result,
+                    failure_kind="access_forbidden" if result.status_code == 403 else "waf",
                     detail="WAF or HTTP 403 response", suggested_strategies=("stealth", "dynamic"),
                     metrics=metrics,
+                )
+            if not 200 <= result.status_code < 300:
+                return StepResult(
+                    "terminal", strategy, output=result, failure_kind="http_status",
+                    detail=f"HTTP {result.status_code} is not a usable response", metrics=metrics,
                 )
             if shell:
                 return StepResult(
@@ -495,17 +612,18 @@ class ScraplingAdaptiveFetcher:
                     detail="JavaScript shell or expected topic missing",
                     suggested_strategies=("dynamic", "stealth"), metrics=metrics,
                 )
-            if 200 <= result.status_code < 300:
-                completeness = completeness_metrics(
-                    result, preview, expect_topic, topic_terms, minimum_visible_chars
+            completeness = completeness_metrics(
+                result, preview, expect_topic, topic_terms, minimum_visible_chars
+            )
+            metrics.update(completeness)
+            if not completeness["complete"]:
+                return StepResult(
+                    "retry", strategy, output=result, failure_kind="incomplete_content",
+                    detail="; ".join(completeness["completeness_reasons"]) or "content completeness score too low",
+                    suggested_strategies=("dynamic", "stealth"), metrics=metrics,
                 )
-                metrics.update(completeness)
-                if not completeness["complete"]:
-                    return StepResult(
-                        "retry", strategy, output=result, failure_kind="incomplete_content",
-                        detail="; ".join(completeness["completeness_reasons"]) or "content completeness score too low",
-                        suggested_strategies=("dynamic", "stealth"), metrics=metrics,
-                    )
+            if used_cloudflare_solver:
+                self.cloudflare_fetch_successes += 1
             return StepResult("success", strategy, output=result, metrics=metrics)
 
         self.agent_runs += 1
@@ -517,10 +635,18 @@ class ScraplingAdaptiveFetcher:
         elif loop_result.status == "blocked":
             self.agent_blocked += 1
         if isinstance(loop_result.output, FetchResult):
-            if loop_result.status != "success":
+            if loop_result.status not in {"success", "not_modified"}:
                 loop_result.output.escalation_reason = loop_result.stop_reason or loop_result.last_error
+                last_attempt = loop_result.attempts[-1] if loop_result.attempts else {}
+                loop_result.output.validation_error = (
+                    loop_result.last_error or loop_result.stop_reason or "agent content validation failed"
+                )
+                loop_result.output.failure_kind = str(last_attempt.get("failure_kind", ""))
             return loop_result.output
-        raise BrowserFetchError(loop_result.last_error or loop_result.stop_reason or "agent fetch failed")
+        raise BrowserFetchError(
+            loop_result.last_error or loop_result.stop_reason or "agent fetch failed",
+            failure_kind=str(loop_result.attempts[-1].get("failure_kind", "")) if loop_result.attempts else "",
+        )
 
     def stats(self) -> dict[str, int]:
         return {

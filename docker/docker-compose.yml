@@ -7,7 +7,7 @@ services:
     container_name: trendradar-official-monitor
     restart: unless-stopped
 
-    entrypoint: ["python", "/app/monitor/official_monitor.py"]
+    entrypoint: ["python", "-m", "monitor.official_monitor"]
 
     ports:
       - "127.0.0.1:8090:8090"
@@ -37,11 +37,18 @@ services:
       - MONITOR_CRITICAL_CHECK_INTERVAL=${MONITOR_CRITICAL_CHECK_INTERVAL:-21600}
       - MONITOR_POLICY_CHECK_INTERVAL=${MONITOR_POLICY_CHECK_INTERVAL:-86400}
       - MONITOR_REFERENCE_CHECK_INTERVAL=${MONITOR_REFERENCE_CHECK_INTERVAL:-604800}
+      - MONITOR_CANDIDATE_CHECK_INTERVAL=${MONITOR_CANDIDATE_CHECK_INTERVAL:-86400}
       - MONITOR_FAILURE_BACKOFF_BASE=${MONITOR_FAILURE_BACKOFF_BASE:-21600}
       - MONITOR_FAILURE_BACKOFF_MAX=${MONITOR_FAILURE_BACKOFF_MAX:-604800}
+      - MONITOR_RECURRING_QUEUE_PERCENT=${MONITOR_RECURRING_QUEUE_PERCENT:-65}
+      - MONITOR_RECOVERY_QUEUE_PERCENT=${MONITOR_RECOVERY_QUEUE_PERCENT:-15}
+      - MONITOR_BASELINE_QUEUE_PERCENT=${MONITOR_BASELINE_QUEUE_PERCENT:-10}
+      - MONITOR_CANDIDATE_QUEUE_PERCENT=${MONITOR_CANDIDATE_QUEUE_PERCENT:-10}
       - MONITOR_HEALTH_MAX_STALE_SECONDS=${MONITOR_HEALTH_MAX_STALE_SECONDS:-1800}
       - MONITOR_INVENTORY=/app/state/knowledge_sources.json
+      - MONITOR_DATABASE=/app/state/monitor.db
       - MONITOR_PORT=8090
+      - MONITOR_POLICY_DIGEST_ENABLED=${MONITOR_POLICY_DIGEST_ENABLED:-true}
       - MONITOR_AI_SUMMARY_ENABLED=${MONITOR_AI_SUMMARY_ENABLED:-true}
       - MONITOR_AI_SUMMARY_BATCH_SIZE=${MONITOR_AI_SUMMARY_BATCH_SIZE:-20}
       - MONITOR_AI_SUMMARY_CONCURRENCY=${MONITOR_AI_SUMMARY_CONCURRENCY:-4}
@@ -81,7 +88,8 @@ services:
     container_name: trendradar-gptmail-key-refresh
     restart: unless-stopped
     depends_on:
-      - official-monitor
+      official-monitor:
+        condition: service_healthy
     entrypoint: ["python", "-m", "monitor.skills.gptmail_otp.provider", "watch"]
     volumes:
       - ../monitor:/app/monitor:ro
@@ -99,7 +107,8 @@ services:
     restart: unless-stopped
 
     depends_on:
-      - official-monitor
+      official-monitor:
+        condition: service_healthy
 
     ports:
       - "127.0.0.1:${WEBSERVER_PORT:-8080}:${WEBSERVER_PORT:-8080}"
@@ -156,11 +165,21 @@ services:
       - CRON_SCHEDULE=${CRON_SCHEDULE:-*/30 * * * *}
       - RUN_MODE=${RUN_MODE:-cron}
       - IMMEDIATE_RUN=${IMMEDIATE_RUN:-true}
+      - MONITOR_STATE_DIR=/app/output/official-monitor
+      - MONITOR_DASHBOARD_URL=http://127.0.0.1:8090
+      - POLICY_DIGEST_PERIOD=${POLICY_DIGEST_PERIOD:-daily}
 
   trendradar-mcp:
-    image: wantcat/trendradar-mcp:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mcp
+    image: trendradar-mcp:local
     container_name: trendradar-mcp
     restart: unless-stopped
+
+    depends_on:
+      official-monitor:
+        condition: service_healthy
 
     ports:
       - "${MCP_HOST:-127.0.0.1}:${MCP_PORT:-3333}:3333"
@@ -172,3 +191,5 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - MCP_PORT=${MCP_PORT:-3333}
+      - OFFICIAL_MONITOR_URL=http://official-monitor:8090
+      - OFFICIAL_MONITOR_TIMEOUT=${OFFICIAL_MONITOR_TIMEOUT:-10}

@@ -25,6 +25,9 @@ from trendradar.commands import check_all_versions, run_doctor, run_test_notific
 from trendradar.commands.version import _fetch_remote_version, _parse_version
 
 
+OFFICIAL_CHANGE_FEED_ID = "official-source-changes"
+
+
 
 # === 主分析器 ===
 class NewsAnalyzer:
@@ -90,10 +93,164 @@ class NewsAnalyzer:
         self._rss_total_count = 0
         self._rss_matched_count = 0
         self._hotlist_total_count = 0
+        self._pending_official_changes: set[tuple[str, int]] = set()
 
         # 初始化存储管理器（使用 AppContext）
         self._init_storage_manager()
         # 注意：update_info 由 main() 函数设置，避免重复请求远程版本
+
+    def _remember_pending_official_changes(self, new_items_dict: Optional[Dict]) -> None:
+        """记录本轮检测到、但尚未确认进入报告的官网变化版本。"""
+        if not new_items_dict:
+            return
+        for item in new_items_dict.get(OFFICIAL_CHANGE_FEED_ID, []):
+            change_id = str(
+                getattr(item, "change_id", "")
+                or getattr(item, "guid", "")
+                or getattr(item, "url", "")
+            ).strip()
+            if change_id:
+                self._pending_official_changes.add(
+                    (change_id, int(getattr(item, "revision", 0) or 1))
+                )
+
+    def _acknowledge_pending_official_changes(
+        self,
+        delivered_changes: set[tuple[str, int]],
+    ) -> bool:
+        """只确认实际进入成功交付物的官网变化；其余继续等待。"""
+        pending = sorted(self._pending_official_changes.intersection(delivered_changes))
+        if not pending:
+            return True
+        if not self.storage_manager.acknowledge_official_changes(pending):
+            print(f"[RSS] {len(pending)} 条官网变化确认失败，将在下轮重新发布")
+            return False
+        self._pending_official_changes.difference_update(pending)
+        print(f"[RSS] 已确认交付 {len(pending)} 条官网变化")
+        return True
+
+    def _build_official_change_report_group(
+        self,
+        new_items_dict: Optional[Dict],
+    ) -> Optional[Dict]:
+        """把待交付的确认变化直接构造成独立报告组，绕过关键词/AI 筛选。"""
+        if not new_items_dict:
+            return None
+
+        from trendradar.ai.filter_pipeline import is_official_change_report_candidate
+        from trendradar.utils.time import format_iso_time_friendly
+
+        candidates = []
+        for item in new_items_dict.get(OFFICIAL_CHANGE_FEED_ID, []):
+            status = str(getattr(item, "status", "confirmed") or "confirmed").lower()
+            if status != "confirmed" or not bool(getattr(item, "is_active", True)):
+                continue
+            if not is_official_change_report_candidate({
+                "source_id": OFFICIAL_CHANGE_FEED_ID,
+                "title": item.title,
+            }):
+                continue
+            candidates.append(item)
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: str(item.published_at or ""), reverse=True)
+        titles = []
+        for rank, item in enumerate(candidates, start=1):
+            published_at = str(item.published_at or "")
+            titles.append({
+                "title": item.title,
+                "source_name": item.feed_name or "官网变化",
+                "source_id": OFFICIAL_CHANGE_FEED_ID,
+                "time_display": (
+                    format_iso_time_friendly(
+                        published_at,
+                        self.ctx.timezone,
+                        include_date=True,
+                    )
+                    if published_at
+                    else ""
+                ),
+                "count": 1,
+                "ranks": [rank],
+                "rank_threshold": self.rank_threshold,
+                "url": item.url,
+                "mobile_url": "",
+                "is_new": True,
+                "summary": item.summary,
+                "author": item.author,
+                "change_id": str(item.change_id or item.guid or item.url or ""),
+                "revision": int(item.revision or 1),
+                "status": status,
+                "supersedes": str(item.supersedes or ""),
+            })
+
+        return {
+            "word": "官网政策变化",
+            "count": len(titles),
+            "position": -1,
+            "titles": titles,
+            "percentage": 100.0,
+            "is_official_change_group": True,
+        }
+
+    @staticmethod
+    def _merge_official_change_report_group(
+        rss_stats: Optional[List[Dict]],
+        official_group: Optional[Dict],
+        *,
+        include_group: bool = True,
+    ) -> Optional[List[Dict]]:
+        """去掉其他分组中的重复变化，并按需注入独立官网变化组。"""
+        if not official_group:
+            return rss_stats
+
+        official_keys = {
+            (str(item.get("change_id", "")), int(item.get("revision", 0) or 1))
+            for item in official_group.get("titles", [])
+            if str(item.get("change_id", ""))
+        }
+        cleaned = []
+        for stat in rss_stats or []:
+            if stat.get("is_official_change_group"):
+                continue
+            titles = [
+                item
+                for item in stat.get("titles", [])
+                if (
+                    str(item.get("change_id", "")),
+                    int(item.get("revision", 0) or 1),
+                ) not in official_keys
+            ]
+            if not titles:
+                continue
+            normalized = dict(stat)
+            normalized["titles"] = titles
+            normalized["count"] = len(titles)
+            cleaned.append(normalized)
+
+        if include_group:
+            return [official_group, *cleaned]
+        return cleaned or None
+
+    @staticmethod
+    def _official_change_revisions_in_report(
+        rss_stats: Optional[List[Dict]],
+    ) -> set[tuple[str, int]]:
+        """读取实际送入 HTML/通知 RSS 区域的官网变化版本。"""
+        delivered = set()
+        for stat in rss_stats or []:
+            for item in stat.get("titles", []):
+                change_id = str(item.get("change_id", "")).strip()
+                if not change_id:
+                    continue
+                if str(item.get("source_id", "")) != OFFICIAL_CHANGE_FEED_ID:
+                    continue
+                if str(item.get("status", "confirmed")).lower() != "confirmed":
+                    continue
+                delivered.add((change_id, int(item.get("revision", 0) or 1)))
+        return delivered
 
     def _init_storage_manager(self) -> None:
         """初始化存储管理器（使用 AppContext）"""
@@ -440,7 +597,7 @@ class NewsAnalyzer:
             print(f"[AI] 分析出错 ({error_type}): {error_msg}")
             # 详细错误日志到 stderr
             import sys
-            print(f"[AI] 详细错误堆栈:", file=sys.stderr)
+            print("[AI] 详细错误堆栈:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             return AIAnalysisResult(success=False, error=f"{error_type}: {error_msg}")
 
@@ -673,6 +830,15 @@ class NewsAnalyzer:
     ) -> Tuple[List[Dict], Optional[str], Optional[AIAnalysisResult], Optional[List[Dict]], Optional[Dict], Optional[List[Dict]]]:
         """统一的分析流水线：数据处理 → 统计计算（关键词/AI筛选）→ AI分析 → HTML生成"""
 
+        official_change_group = next(
+            (
+                stat
+                for stat in (rss_items or [])
+                if stat.get("is_official_change_group")
+            ),
+            None,
+        )
+
         # 根据筛选策略选择数据处理方式
         if self.filter_method == "ai":
             # === AI 筛选策略 ===
@@ -690,8 +856,15 @@ class NewsAnalyzer:
 
                 # AI 筛选成功：无条件用 AI 结果替换 RSS 主区与新增区（与热榜 stats 一致，
                 # 不因 AI 命中为空而回退到关键词结果）
-                rss_items = ai_rss_stats
-                rss_new_items = ai_rss_new_stats
+                rss_items = self._merge_official_change_report_group(
+                    ai_rss_stats,
+                    official_change_group,
+                )
+                rss_new_items = self._merge_official_change_report_group(
+                    ai_rss_new_stats,
+                    official_change_group,
+                    include_group=False,
+                )
             else:
                 # AI 筛选失败，回退到关键词匹配
                 error_msg = ai_filter_result.error if ai_filter_result else "未知错误"
@@ -895,14 +1068,14 @@ class NewsAnalyzer:
                 print("未配置任何通知渠道，跳过通知发送")
                 return False
 
-            # 记录推送成功
-            if any(results.values()):
+            sent = any(results.values())
+            if sent:
                 if schedule.once_push and schedule.period_key:
                     scheduler = self.ctx.create_scheduler()
                     date_str = self.ctx.format_date()
                     scheduler.record_execution(schedule.period_key, "push", date_str)
 
-            return True
+            return sent
 
         elif cfg["ENABLE_NOTIFICATION"] and not has_notification:
             print("⚠️ 警告：通知功能已启用但未配置任何通知渠道，将跳过通知发送")
@@ -1087,12 +1260,12 @@ class NewsAnalyzer:
 
             # 保存到存储后端
             if self.storage_manager.save_rss_data(rss_data):
-                print(f"[RSS] 数据已保存到存储后端")
+                print("[RSS] 数据已保存到存储后端")
 
                 # 处理 RSS 数据（按模式过滤）并返回用于合并推送
                 return self._process_rss_data_by_mode(rss_data)
             else:
-                print(f"[RSS] 数据保存失败")
+                print("[RSS] 数据保存失败")
                 return None, None, None, set()
 
         except ImportError as e:
@@ -1141,11 +1314,17 @@ class NewsAnalyzer:
         rss_new_stats = None
         raw_rss_items = None  # 原始 RSS 条目列表（用于独立展示区）
         rss_new_urls = set()  # 原始新增 RSS URLs（未经关键词过滤）
+        new_items_dict = self.storage_manager.detect_new_rss_items(rss_data)
+        self._remember_pending_official_changes(new_items_dict)
+        official_change_group = (
+            self._build_official_change_report_group(new_items_dict)
+            if rss_display_enabled
+            else None
+        )
 
         # 1. 首先获取原始条目（用于独立展示区，不受 display.regions.rss 影响）
         # 根据模式获取原始条目
         if self.report_mode == "incremental":
-            new_items_dict = self.storage_manager.detect_new_rss_items(rss_data)
             if new_items_dict:
                 raw_rss_items = self._convert_rss_items_to_list(new_items_dict, rss_data.id_to_name)
         elif self.report_mode == "current":
@@ -1162,7 +1341,6 @@ class NewsAnalyzer:
             return None, None, raw_rss_items, rss_new_urls
 
         # 2. 获取新增条目（用于统计）
-        new_items_dict = self.storage_manager.detect_new_rss_items(rss_data)
         new_items_list = None
         if new_items_dict:
             new_items_list = self._convert_rss_items_to_list(new_items_dict, rss_data.id_to_name)
@@ -1176,7 +1354,12 @@ class NewsAnalyzer:
             # 增量模式：统计条目就是新增条目
             if not new_items_list:
                 print("[RSS] 增量模式：没有新增 RSS 条目")
-                return None, None, raw_rss_items, rss_new_urls
+                return (
+                    [official_change_group] if official_change_group else None,
+                    None,
+                    raw_rss_items,
+                    rss_new_urls,
+                )
 
             rss_stats, total = count_rss_frequency(
                 rss_items=new_items_list,
@@ -1193,14 +1376,24 @@ class NewsAnalyzer:
             if not rss_stats:
                 print("[RSS] 增量模式：关键词匹配后没有内容")
                 # 即使关键词匹配为空，也返回原始条目用于独立展示区
-                return None, None, raw_rss_items, rss_new_urls
+                return (
+                    [official_change_group] if official_change_group else None,
+                    None,
+                    raw_rss_items,
+                    rss_new_urls,
+                )
 
         elif self.report_mode == "current":
             # 当前榜单模式：统计=当前榜单所有条目
             # raw_rss_items 已在前面获取
             if not raw_rss_items:
                 print("[RSS] 当前榜单模式：没有 RSS 数据")
-                return None, None, None, rss_new_urls
+                return (
+                    [official_change_group] if official_change_group else None,
+                    None,
+                    None,
+                    rss_new_urls,
+                )
 
             rss_stats, total = count_rss_frequency(
                 rss_items=raw_rss_items,
@@ -1217,7 +1410,12 @@ class NewsAnalyzer:
             if not rss_stats:
                 print("[RSS] 当前榜单模式：关键词匹配后没有内容")
                 # 即使关键词匹配为空，也返回原始条目用于独立展示区
-                return None, None, raw_rss_items, rss_new_urls
+                return (
+                    [official_change_group] if official_change_group else None,
+                    None,
+                    raw_rss_items,
+                    rss_new_urls,
+                )
 
             # 生成新增统计
             if new_items_list:
@@ -1239,7 +1437,12 @@ class NewsAnalyzer:
             # raw_rss_items 已在前面获取
             if not raw_rss_items:
                 print("[RSS] 当日汇总模式：没有 RSS 数据")
-                return None, None, None, rss_new_urls
+                return (
+                    [official_change_group] if official_change_group else None,
+                    None,
+                    None,
+                    rss_new_urls,
+                )
 
             rss_stats, total = count_rss_frequency(
                 rss_items=raw_rss_items,
@@ -1256,7 +1459,12 @@ class NewsAnalyzer:
             if not rss_stats:
                 print("[RSS] 当日汇总模式：关键词匹配后没有内容")
                 # 即使关键词匹配为空，也返回原始条目用于独立展示区
-                return None, None, raw_rss_items, rss_new_urls
+                return (
+                    [official_change_group] if official_change_group else None,
+                    None,
+                    raw_rss_items,
+                    rss_new_urls,
+                )
 
             # 生成新增统计
             if new_items_list:
@@ -1273,13 +1481,25 @@ class NewsAnalyzer:
                     quiet=True,
                 )
 
+        rss_stats = self._merge_official_change_report_group(
+            rss_stats,
+            official_change_group,
+        )
+        rss_new_stats = self._merge_official_change_report_group(
+            rss_new_stats,
+            official_change_group,
+            include_group=False,
+        )
         self._rss_total_count = total
         return rss_stats, rss_new_stats, raw_rss_items, rss_new_urls
 
     def _convert_rss_items_to_list(self, items_dict: Dict, id_to_name: Dict) -> List[Dict]:
         """将 RSS 条目字典转换为列表格式，并应用新鲜度过滤（用于推送）"""
+        from trendradar.ai.filter_pipeline import is_reportable_rss_item
+
         rss_items = []
         filtered_count = 0
+        official_feed_filtered_count = 0
         filtered_details = []  # 用于 DEBUG 模式下的详细日志
 
         # 获取新鲜度过滤配置
@@ -1308,6 +1528,12 @@ class NewsAnalyzer:
                 max_days = default_max_age_days
 
             for item in items:
+                if not bool(getattr(item, "is_active", True)):
+                    continue
+                if not is_reportable_rss_item({"source_id": feed_id, "title": item.title}):
+                    official_feed_filtered_count += 1
+                    continue
+
                 # 应用新鲜度过滤（仅在启用时）
                 if freshness_enabled and max_days > 0:
                     if item.published_at and not is_within_days(item.published_at, max_days, timezone):
@@ -1332,6 +1558,10 @@ class NewsAnalyzer:
                     "published_at": item.published_at,
                     "summary": item.summary,
                     "author": item.author,
+                    "change_id": getattr(item, "change_id", ""),
+                    "revision": getattr(item, "revision", 0),
+                    "status": getattr(item, "status", ""),
+                    "supersedes": getattr(item, "supersedes", ""),
                 })
 
         # 输出过滤统计
@@ -1345,6 +1575,11 @@ class NewsAnalyzer:
                     print(f"  - [{days_str}天前] [{detail['feed']}] {detail['title']} (限制: {detail['max_days']}天)")
                 if len(filtered_details) > 10:
                     print(f"  ... 还有 {len(filtered_details) - 10} 篇被过滤")
+
+        if official_feed_filtered_count > 0:
+            print(
+                f"[RSS] 已从普通 RSS 通道隔离 {official_feed_filtered_count} 条官网变化"
+            )
 
         return rss_items
 
@@ -1588,15 +1823,20 @@ class NewsAnalyzer:
                 rss_new_urls=rss_new_urls,
             )
 
+        delivered_official_changes = self._official_change_revisions_in_report(
+            rss_items
+        )
         if html_file:
             print(f"HTML报告已生成: {html_file}")
             print(f"最新报告已更新: output/html/latest/{self.report_mode}.html")
+            self._acknowledge_pending_official_changes(delivered_official_changes)
 
         # 发送通知
+        notification_sent = False
         if mode_strategy["should_send_notification"]:
             # standalone_data 已在分析流水线中翻译，直接复用（不再重新 prepare 原文，
             # 避免覆盖译文、避免重复翻译，并保证网页报告与推送译文一致）
-            self._send_notification_if_needed(
+            notification_sent = self._send_notification_if_needed(
                 stats,
                 mode_strategy["report_type"],
                 self.report_mode,
@@ -1611,6 +1851,8 @@ class NewsAnalyzer:
                 current_results=results,
                 schedule=schedule,
             )
+        if not html_file and notification_sent:
+            self._acknowledge_pending_official_changes(delivered_official_changes)
 
         # 打开浏览器（仅在非容器环境）
         if self._should_open_browser() and html_file:

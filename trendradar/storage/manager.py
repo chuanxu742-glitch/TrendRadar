@@ -116,7 +116,7 @@ class StorageManager:
         # 调试日志
         has_config = bool(bucket_name and access_key and secret_key and endpoint)
         if not has_config:
-            print(f"[存储管理器] 远程存储配置检查失败:")
+            print("[存储管理器] 远程存储配置检查失败:")
             print(f"  - bucket_name: {'已配置' if bucket_name else '未配置'}")
             print(f"  - access_key_id: {'已配置' if access_key else '未配置'}")
             print(f"  - secret_access_key: {'已配置' if secret_key else '未配置'}")
@@ -155,7 +155,7 @@ class StorageManager:
             if resolved_type == "remote":
                 self._backend = self._create_remote_backend()
                 if self._backend:
-                    print(f"[存储管理器] 使用远程存储后端")
+                    print("[存储管理器] 使用远程存储后端")
                 else:
                     print("[存储管理器] 回退到本地存储")
                     resolved_type = "local"
@@ -217,6 +217,13 @@ class StorageManager:
     def detect_new_rss_items(self, current_data: RSSData) -> dict:
         """检测新增的 RSS 条目（增量模式）"""
         return self.get_backend().detect_new_rss_items(current_data)
+
+    def acknowledge_official_changes(
+        self,
+        change_revisions: list[tuple[str, int]],
+    ) -> bool:
+        """确认指定官网变化版本已经成功进入报告或通知。"""
+        return self.get_backend().acknowledge_official_changes(change_revisions)
 
     def get_today_all_data(self, date: Optional[str] = None) -> Optional[NewsData]:
         """获取当天所有数据"""

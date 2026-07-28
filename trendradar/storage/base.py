@@ -86,6 +86,13 @@ class RSSItem:
     last_time: str = ""                 # 最后抓取时间
     count: int = 1                      # 抓取次数
 
+    # 结构化变更元数据（普通 RSS 条目保持默认值）
+    change_id: str = ""                 # 上游稳定变更 ID
+    revision: int = 0                   # 变更修订号
+    status: str = ""                    # confirmed / retracted / superseded
+    supersedes: str = ""                # 当前变更替代的 change_id
+    is_active: bool = True              # 是否仍属于上游有效集合
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -93,6 +100,7 @@ class RSSItem:
             "feed_id": self.feed_id,
             "feed_name": self.feed_name,
             "url": self.url,
+            "guid": self.guid,
             "published_at": self.published_at,
             "summary": self.summary,
             "author": self.author,
@@ -100,16 +108,28 @@ class RSSItem:
             "first_time": self.first_time,
             "last_time": self.last_time,
             "count": self.count,
+            "change_id": self.change_id,
+            "revision": self.revision,
+            "status": self.status,
+            "supersedes": self.supersedes,
+            "is_active": self.is_active,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "RSSItem":
         """从字典创建"""
+        raw_active = data.get("is_active", True)
+        is_active = (
+            raw_active.strip().lower() not in {"0", "false", "no", "off"}
+            if isinstance(raw_active, str)
+            else bool(raw_active)
+        )
         return cls(
             title=data.get("title", ""),
             feed_id=data.get("feed_id", ""),
             feed_name=data.get("feed_name", ""),
             url=data.get("url", ""),
+            guid=data.get("guid", ""),
             published_at=data.get("published_at", ""),
             summary=data.get("summary", ""),
             author=data.get("author", ""),
@@ -117,6 +137,11 @@ class RSSItem:
             first_time=data.get("first_time", ""),
             last_time=data.get("last_time", ""),
             count=data.get("count", 1),
+            change_id=data.get("change_id", ""),
+            revision=int(data.get("revision", 0) or 0),
+            status=data.get("status", ""),
+            supersedes=data.get("supersedes", ""),
+            is_active=is_active,
         )
 
 
@@ -131,6 +156,7 @@ class RSSData:
     - items: 按 feed_id 分组的 RSS 条目
     - id_to_name: feed_id 到名称的映射
     - failed_ids: 失败的 feed_id 列表
+    - authoritative_complete_ids: 已通过完整性校验、可安全执行缺失撤销的权威快照
     """
 
     date: str                                   # 日期
@@ -138,6 +164,7 @@ class RSSData:
     items: Dict[str, List[RSSItem]]             # 按 feed_id 分组的条目
     id_to_name: Dict[str, str] = field(default_factory=dict)   # ID到名称映射
     failed_ids: List[str] = field(default_factory=list)        # 失败的ID
+    authoritative_complete_ids: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -151,6 +178,7 @@ class RSSData:
             "items": items_dict,
             "id_to_name": self.id_to_name,
             "failed_ids": self.failed_ids,
+            "authoritative_complete_ids": self.authoritative_complete_ids,
         }
 
     @classmethod
@@ -167,6 +195,7 @@ class RSSData:
             items=items,
             id_to_name=data.get("id_to_name", {}),
             failed_ids=data.get("failed_ids", []),
+            authoritative_complete_ids=data.get("authoritative_complete_ids", []),
         )
 
     def get_total_count(self) -> int:

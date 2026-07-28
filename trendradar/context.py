@@ -33,8 +33,6 @@ from trendradar.report import (
     render_html_content,
 )
 from trendradar.notification import (
-    render_feishu_content,
-    render_dingtalk_content,
     split_content_into_batches,
     NotificationDispatcher,
 )
@@ -365,41 +363,6 @@ class AppContext:
             ai_analysis=ai_analysis,
             show_new_section=self.show_new_section,
             standalone_data=standalone_data,
-        )
-
-    # === 通知内容渲染 ===
-
-    def render_feishu(
-        self,
-        report_data: Dict,
-        update_info: Optional[Dict] = None,
-        mode: str = "daily",
-    ) -> str:
-        """渲染飞书内容"""
-        return render_feishu_content(
-            report_data=report_data,
-            update_info=update_info,
-            mode=mode,
-            separator=self.config.get("FEISHU_MESSAGE_SEPARATOR", "---"),
-            region_order=self.region_order,
-            get_time_func=self.get_time,
-            show_new_section=self.show_new_section,
-        )
-
-    def render_dingtalk(
-        self,
-        report_data: Dict,
-        update_info: Optional[Dict] = None,
-        mode: str = "daily",
-    ) -> str:
-        """渲染钉钉内容"""
-        return render_dingtalk_content(
-            report_data=report_data,
-            update_info=update_info,
-            mode=mode,
-            region_order=self.region_order,
-            get_time_func=self.get_time,
-            show_new_section=self.show_new_section,
         )
 
     def split_content(
