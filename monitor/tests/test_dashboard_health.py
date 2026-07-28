@@ -18,7 +18,6 @@ class DashboardContractTests(unittest.TestCase):
 
     def test_dashboard_exposes_functional_health_metrics(self) -> None:
         for marker in (
-            'id="healthStatus"',
             'id="functionalHealth"',
             'id="dueBacklog"',
             'id="baselineCoverage"',
@@ -38,6 +37,12 @@ class DashboardContractTests(unittest.TestCase):
             "renderHealth(data.health)",
         ):
             self.assertIn(marker, self.dashboard)
+        for topbar_status_marker in (
+            'id="healthStatus"',
+            'id="healthStatusText"',
+            'class="health ',
+        ):
+            self.assertNotIn(topbar_status_marker, self.dashboard)
 
     def test_dashboard_uses_precise_operational_terms(self) -> None:
         for copy in (
