@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 from urllib.request import urlopen
 
-from xhs_monitor.service import Settings, build_handler, collect_once
+from xhs_monitor.login import qrcode_login
+from xhs_monitor.service import (
+    Settings,
+    build_handler,
+    collect_once,
+    collection_worker,
+    load_settings,
+)
 from xhs_monitor.store import XiaohongshuStore
 from http.server import ThreadingHTTPServer
 
@@ -45,6 +55,31 @@ class FakeFetcher:
             {},
             ["xhs-service-dog-cabin-refused"],
         )
+
+
+class FakeLoginApi:
+    def generate_init_cookies(self):
+        return {"initial": "cookie"}
+
+    def generate_qrcode(self, cookies):
+        return True, "", {
+            "cookies": cookies,
+            "qr_url": "https://example.invalid/qr",
+            "qr_id": "qr-id",
+            "code": "code",
+        }
+
+    def show_qrcode_terminal(self, _url):
+        print("[test-qr]")
+
+    def check_qrcode_status(self, _qr_id, _code, cookies):
+        return True, "登录成功", cookies
+
+    def get_user_info(self, cookies):
+        return True, {"nickname": "测试账号"}, cookies
+
+    def cookies_to_str(self, _cookies):
+        return "private-session-value"
 
 
 class XiaohongshuMonitorTests(unittest.TestCase):
@@ -141,6 +176,94 @@ class XiaohongshuMonitorTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_standalone_login_writes_cookie_without_printing_it(self) -> None:
+        cookie_path = self.root / "config" / "xhs_cookie.txt"
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            success = qrcode_login(
+                cookie_path,
+                api_loader=lambda: FakeLoginApi(),
+            )
+
+        self.assertTrue(success)
+        self.assertEqual(cookie_path.read_text(encoding="utf-8"), "private-session-value")
+        self.assertNotIn("private-session-value", output.getvalue())
+
+    def test_cookie_file_takes_priority_over_stale_environment_cookie(self) -> None:
+        config_directory = self.root / "config"
+        config_directory.mkdir()
+        config_path = config_directory / "xhs-monitor.yaml"
+        config_path.write_text(
+            """
+xiaohongshu:
+  enabled: true
+  cookie_file: config/xhs_cookie.txt
+  keywords: []
+""".strip(),
+            encoding="utf-8",
+        )
+        (config_directory / "xhs_cookie.txt").write_text(
+            "fresh-file-session",
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "XHS_COOKIE": "stale-environment-session",
+                "XHS_COOKIE_FILE": "",
+            },
+            clear=False,
+        ):
+            settings = load_settings(config_path)
+
+        self.assertEqual(settings.fetcher_config["COOKIE"], "fresh-file-session")
+
+    def test_worker_collects_immediately_when_login_state_changes(self) -> None:
+        waiting_settings = replace(
+            self.settings,
+            immediate_run=False,
+            fetcher_config={**self.settings.fetcher_config, "COOKIE": ""},
+        )
+        logged_in_settings = replace(
+            waiting_settings,
+            fetcher_config={
+                **waiting_settings.fetcher_config,
+                "COOKIE": "new-session",
+            },
+        )
+        loaded_settings = iter([waiting_settings, logged_in_settings])
+        collected: list[Settings] = []
+        sleep_calls = 0
+
+        def collect_func(settings, _store):
+            collected.append(settings)
+            return {
+                "status": "available",
+                "source_count": 2,
+                "item_count": 1,
+            }
+
+        def sleep_func(_seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 2:
+                raise StopIteration
+
+        with self.assertRaises(StopIteration):
+            collection_worker(
+                waiting_settings,
+                self.store,
+                settings_loader=lambda: next(loaded_settings),
+                collect_func=collect_func,
+                monotonic_func=lambda: 0,
+                sleep_func=sleep_func,
+            )
+
+        self.assertEqual(len(collected), 1)
+        self.assertEqual(collected[0].fetcher_config["COOKIE"], "new-session")
 
 
 if __name__ == "__main__":

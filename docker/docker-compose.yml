@@ -15,7 +15,6 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - XHS_ENABLED=${XHS_ENABLED:-true}
-      - XHS_COOKIE=${XHS_COOKIE:-}
       - XHS_COOKIE_FILE=${XHS_COOKIE_FILE:-config/xhs_cookie.txt}
       - XHS_PROXY_URL=${XHS_PROXY_URL:-}
       - XHS_MONITOR_INTERVAL=${XHS_MONITOR_INTERVAL:-1800}
@@ -30,6 +29,21 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  xhs-login:
+    image: trendradar-xhs-monitor:local
+    container_name: trendradar-xhs-login
+    profiles: ["xhs-login"]
+    entrypoint: ["python", "-m", "xhs_monitor.login"]
+    stdin_open: true
+    tty: true
+
+    volumes:
+      - ../config:/app/config
+
+    environment:
+      - TZ=Asia/Shanghai
+      - XHS_COOKIE_FILE=/app/config/xhs_cookie.txt
 
   official-monitor:
     build:

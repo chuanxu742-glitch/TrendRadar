@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import importlib.util
 import os
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -14,29 +13,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 
+from xhs_monitor.fetcher import XiaohongshuFetcher
 from xhs_monitor.store import XiaohongshuStore, now_iso
-
-
-def _load_fetcher_class() -> type:
-    """Load the focused fetcher without importing the full TrendRadar application."""
-
-    module_name = "_trendradar_xiaohongshu_fetcher"
-    module_path = (
-        Path(__file__).resolve().parents[1]
-        / "trendradar"
-        / "crawler"
-        / "xiaohongshu.py"
-    )
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load Xiaohongshu fetcher from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module.XiaohongshuFetcher
-
-
-XiaohongshuFetcher = _load_fetcher_class()
 
 
 @dataclass(frozen=True)
@@ -57,21 +35,20 @@ def _enabled(value: Any, default: bool = False) -> bool:
 
 
 def _read_cookie(config: dict[str, Any], config_path: Path) -> str:
-    cookie = str(os.getenv("XHS_COOKIE", "")).strip()
-    if cookie:
-        return cookie
     configured_file = str(
         os.getenv("XHS_COOKIE_FILE", "") or config.get("cookie_file") or ""
     ).strip()
-    if not configured_file:
-        return ""
-    path = Path(configured_file)
-    if not path.is_absolute():
-        path = (config_path.parent.parent / path).resolve()
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    if configured_file:
+        path = Path(configured_file)
+        if not path.is_absolute():
+            path = (config_path.parent.parent / path).resolve()
+        try:
+            cookie = path.read_text(encoding="utf-8").strip()
+            if cookie:
+                return cookie
+        except OSError:
+            pass
+    return str(os.getenv("XHS_COOKIE", "")).strip()
 
 
 def load_settings(path: Path | None = None) -> Settings:
@@ -181,20 +158,45 @@ def build_handler(store: XiaohongshuStore) -> type[BaseHTTPRequestHandler]:
     return RequestHandler
 
 
-def collection_worker(settings: Settings, store: XiaohongshuStore) -> None:
-    if not settings.immediate_run:
-        time.sleep(settings.interval_seconds)
+def _credential_signature(settings: Settings) -> str:
+    cookie = str(settings.fetcher_config.get("COOKIE") or "")
+    return hashlib.sha256(cookie.encode("utf-8")).hexdigest()
+
+
+def collection_worker(
+    settings: Settings,
+    store: XiaohongshuStore,
+    *,
+    settings_loader: Callable[[], Settings] = load_settings,
+    collect_func: Callable[[Settings, XiaohongshuStore], dict[str, int | str]] = collect_once,
+    monotonic_func: Callable[[], float] = time.monotonic,
+    sleep_func: Callable[[float], None] = time.sleep,
+) -> None:
+    current_settings = settings
+    last_signature = _credential_signature(settings)
+    next_run = (
+        monotonic_func()
+        if settings.immediate_run
+        else monotonic_func() + settings.interval_seconds
+    )
     while True:
-        started = time.monotonic()
-        result = collect_once(settings, store)
-        print(
-            "[xhs-monitor] collection complete; "
-            f"status={result['status']} sources={result['source_count']} "
-            f"items={result['item_count']}",
-            flush=True,
-        )
-        elapsed = time.monotonic() - started
-        time.sleep(max(settings.interval_seconds - elapsed, 0))
+        refreshed_settings = settings_loader()
+        refreshed_signature = _credential_signature(refreshed_settings)
+        credential_changed = refreshed_signature != last_signature
+        if credential_changed:
+            current_settings = refreshed_settings
+            last_signature = refreshed_signature
+            next_run = monotonic_func()
+        if monotonic_func() >= next_run:
+            result = collect_func(current_settings, store)
+            print(
+                "[xhs-monitor] collection complete; "
+                f"status={result['status']} sources={result['source_count']} "
+                f"items={result['item_count']}",
+                flush=True,
+            )
+            next_run = monotonic_func() + current_settings.interval_seconds
+        sleep_func(min(max(next_run - monotonic_func(), 1), 10))
 
 
 def main() -> None:

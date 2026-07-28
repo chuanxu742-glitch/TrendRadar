@@ -14,7 +14,9 @@ RUN pip install --no-cache-dir \
     requests==2.33.0 \
     PyYAML==6.0.3 \
     PyExecJS==1.5.1 \
-    loguru==0.7.3
+    loguru==0.7.3 \
+    python-dotenv==1.1.1 \
+    qrcode==8.2
 
 COPY trendradar ./trendradar
 COPY xhs_monitor ./xhs_monitor
