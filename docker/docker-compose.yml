@@ -15,6 +15,7 @@ services:
     volumes:
       - ../monitor:/app/monitor:ro
       - ../config:/app/config:ro
+      - ../output/news:/app/output/news:ro
       - ../output/official-monitor:/app/state
 
     environment:
@@ -47,6 +48,7 @@ services:
       - MONITOR_HEALTH_MAX_STALE_SECONDS=${MONITOR_HEALTH_MAX_STALE_SECONDS:-1800}
       - MONITOR_INVENTORY=/app/state/knowledge_sources.json
       - MONITOR_DATABASE=/app/state/monitor.db
+      - MONITOR_NEWS_DIR=/app/output/news
       - MONITOR_PORT=8090
       - MONITOR_POLICY_DIGEST_ENABLED=${MONITOR_POLICY_DIGEST_ENABLED:-true}
       - MONITOR_AI_SUMMARY_ENABLED=${MONITOR_AI_SUMMARY_ENABLED:-true}

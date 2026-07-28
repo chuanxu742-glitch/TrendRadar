@@ -155,6 +155,23 @@ class MonitorHttpContractTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, self.authoritative_feed)
 
+    def test_social_intelligence_endpoint_returns_boss_safe_payload(self) -> None:
+        expected = {
+            "status": "unavailable",
+            "status_label": "今日数据暂未更新",
+            "recent_count": 0,
+            "items": [],
+        }
+        with mock.patch.object(
+            official_monitor,
+            "social_intelligence_payload",
+            return_value=expected,
+        ) as payload:
+            response = self.fetch_json("/api/v1/social-intelligence?limit=20")
+
+        self.assertEqual(response, expected)
+        payload.assert_called_once_with(limit=20)
+
     def test_sources_count_is_filtered_total_not_page_size(self) -> None:
         self.add_sources(3)
 

@@ -16,8 +16,8 @@ class DashboardContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.dashboard = (Path(__file__).parents[1] / "dashboard.html").read_text(encoding="utf-8")
 
-    def test_dashboard_exposes_functional_health_metrics(self) -> None:
-        for marker in (
+    def test_dashboard_keeps_operational_health_out_of_boss_view(self) -> None:
+        for operational_marker in (
             'id="functionalHealth"',
             'id="dueBacklog"',
             'id="baselineCoverage"',
@@ -35,29 +35,36 @@ class DashboardContractTests(unittest.TestCase):
             '$("deferredSources").textContent=number(data.summary.deferred)',
             '$("siteInventoryCoverage").textContent=percent(u.fetch_coverage)',
             "renderHealth(data.health)",
-        ):
-            self.assertIn(marker, self.dashboard)
-        for topbar_status_marker in (
             'id="healthStatus"',
             'id="healthStatusText"',
             'class="health ',
+            "查看页面监控技术状态",
+            "运行降级",
         ):
-            self.assertNotIn(topbar_status_marker, self.dashboard)
+            self.assertNotIn(operational_marker, self.dashboard)
 
-    def test_dashboard_uses_precise_operational_terms(self) -> None:
+    def test_dashboard_presents_official_social_and_knowledge_business_views(self) -> None:
         for copy in (
-            "验证有效抓取",
-            "正式复核任务",
-            "已暂停来源",
-            "容量延后",
-            "来源覆盖与政策知识",
-            "去重知识来源网址",
-            "全站稳定网址",
-            "低相关轮换抽检",
-            "未读取及跳过原因",
+            'id="officialSignalCount"',
+            'id="socialSignalCount"',
+            'id="knowledgeUpdateCount"',
+            'id="socialStatus"',
+            'id="socialList"',
+            "官网政策变化",
+            "小红书业务情报",
+            "知识库自动更新",
+            "由已验证官网变化产生，可追溯回滚",
+            "客户真实遭遇、拒载案例和一线执行差异",
+            ".filter(item=>item.active_revision_id).length",
         ):
             self.assertIn(copy, self.dashboard)
-        for misleading_copy in ("智能抓取成功", "等待人工处理", "现行政策知识库", "去重监控来源"):
+        for misleading_copy in (
+            "智能抓取成功",
+            "等待人工处理",
+            "现行政策知识库",
+            "去重监控来源",
+            "小红书政策变化",
+        ):
             self.assertNotIn(misleading_copy, self.dashboard)
 
     def test_knowledge_current_policy_link_requires_absolute_http_url(self) -> None:

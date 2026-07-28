@@ -121,6 +121,11 @@ except ImportError:
     )
 
 try:
+    from .social_intelligence import load_xiaohongshu_intelligence
+except ImportError:
+    from social_intelligence import load_xiaohongshu_intelligence
+
+try:
     from .scrapling_fetch import BrowserFetchBudget, ScraplingAdaptiveFetcher
     from .scraping_agent import AgentStateStore
 except ImportError:
@@ -140,6 +145,7 @@ serve = _http_api.serve
 CONFIG_PATH = Path(os.getenv("MONITOR_CONFIG", "/app/monitor/sources.yaml"))
 STATE_DIR = Path(os.getenv("MONITOR_STATE_DIR", "/app/state"))
 INVENTORY_PATH = Path(os.getenv("MONITOR_INVENTORY", "/app/state/knowledge_sources.json"))
+NEWS_DIR = Path(os.getenv("MONITOR_NEWS_DIR", "/app/output/news"))
 PORT = int(os.getenv("MONITOR_PORT", "8090"))
 MONITOR_INTERVAL = max(int(os.getenv("MONITOR_INTERVAL", "900")), 30)
 BATCH_SIZE = int(os.getenv("MONITOR_BATCH_SIZE", "75"))
@@ -2694,6 +2700,10 @@ def sync_policy_change_ledger(
         return _sync_policy_change_ledger_unlocked(events, policy_summaries, state)
 
 
+def social_intelligence_payload(*, limit: int = 100) -> dict[str, Any]:
+    return load_xiaohongshu_intelligence(NEWS_DIR, limit=limit)
+
+
 def dashboard_payload() -> dict[str, Any]:
     all_state = load_state_with_journal(STATE_DIR / "state.json")
     monitor_meta = load_json(STATE_DIR / "monitor_meta.json", {})
@@ -2946,6 +2956,7 @@ def dashboard_payload() -> dict[str, Any]:
             **operations.get("knowledge_updates", {}),
             "items": [knowledge_update_api_item(item) for item in knowledge_proposals[:20]],
         },
+        "social_intelligence": social_intelligence_payload(),
         "change_candidates": operations.get("change_candidates", {}),
         "policy_revisions": operations.get("policy_revisions", {}),
         "materialized_knowledge": materialized_knowledge_inventory(),
@@ -3119,6 +3130,7 @@ def business_brief_payload() -> dict[str, Any]:
             "generated_at", "health", "summary", "changes", "progress", "discovery", "agent",
             "lifecycle", "review_tasks", "knowledge_updates", "change_candidates", "policy_revisions",
             "current_error_categories", "unverified_error_categories", "current_failures",
+            "social_intelligence",
         )
     }
     brief["events"] = payload.get("policy_changes", [])
@@ -6720,6 +6732,30 @@ def reject_candidate_change(
             )
 
 
+def knowledge_auto_update_authorization(
+    store: MonitorStore,
+    revision: PolicyChangeRevision,
+) -> tuple[bool, str]:
+    """Allow autonomous writes only for verified official-policy endpoints."""
+
+    if not revision.source_id:
+        return False, "policy revision has no source endpoint"
+    try:
+        source = store.get_source(revision.source_id)
+    except KeyError:
+        return False, "policy revision source endpoint is missing"
+    if not source.enabled or source.lifecycle_state in {"quarantined", "retired"}:
+        return False, "policy revision source endpoint is inactive"
+    if source.role not in {"current-primary", "trusted-secondary"}:
+        return False, "source is not an authorized official policy endpoint"
+    hostname = (urlsplit(source.canonical_url).hostname or "").lower()
+    if hostname == "xiaohongshu.com" or hostname.endswith(".xiaohongshu.com"):
+        return False, "social intelligence cannot autonomously update policy knowledge"
+    if source.metadata.get("knowledge_auto_update") is False:
+        return False, "automatic knowledge update is disabled for this source"
+    return True, "verified official policy endpoint"
+
+
 def knowledge_update_agent_once(limit: int = 20) -> dict[str, int]:
     """Apply confirmed knowledge proposals without allowing one failure to stop the loop."""
     store = monitor_store()
@@ -6741,6 +6777,10 @@ def knowledge_update_agent_once(limit: int = 20) -> dict[str, int]:
         try:
             revision = store.get_policy_change_revision(proposal.policy_change_revision_id)
             if revision.status != "confirmed":
+                result["knowledge_skipped"] += 1
+                continue
+            authorized, _ = knowledge_auto_update_authorization(store, revision)
+            if not authorized:
                 result["knowledge_skipped"] += 1
                 continue
             if proposal.target_ref in blocked_targets:

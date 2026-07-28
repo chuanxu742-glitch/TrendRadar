@@ -12,6 +12,17 @@
 8. 候选页面连续验证通过后进入来源注册表；无关页面保留审计记录但退出持续监控。
 9. 变化事件写入 RSS，供 TrendRadar 消费；业务页面只展示确认后的政策条款变化。
 
+## 老板统一面板与知识更新权限
+
+- `http://127.0.0.1:8090/` 是统一业务入口，同时展示官网政策变化、小红书业务情报和知识库更新结果。
+- 页面不展示积压、并发、熔断或 `degraded` 等运维状态；这些指标仍保留在健康接口供内部诊断。
+- `current-primary` 和 `trusted-secondary` 官网来源在快照、差异和证据链全部验证通过后，可以自动形成并应用版本化知识更新。
+- 候选来源、手工新增但尚未验证的来源和小红书内容只能形成情报或待确认提案，不能自动改写政策事实。
+- 小红书情报从 TrendRadar 每日新闻 SQLite 只读接入；页面只展示公开搜索结果和业务可用状态，不暴露 Cookie、登录或错误细节。
+- 每次官网知识更新都保留来源、修订、证据和历史版本，可以回滚。
+- `/api/v1/social-intelligence`：查询统一面板使用的小红书业务情报。
+- `MONITOR_NEWS_DIR`：TrendRadar 每日新闻 SQLite 目录，容器默认 `/app/output/news`。
+
 ## 手工与批量添加数据源
 
 - 仪表盘右上角“添加数据源”只要求填写 URL，支持单个 URL、每行一个、Excel 复制内容和夹杂说明文字的批量输入。
@@ -115,6 +126,7 @@
 - `/api/v1/policy-change-digest`：按国家、地区或航司汇总通过完整证据链校验的当前有效修订；支持`from`、`to`、`kind`、`period=daily|weekly|monthly`、`format=json|text|markdown`和`limit`查询参数。
 - `/api/v1/site-url-inventory`：查询全站 URL 台账，支持按`origin`、`relevance`和`status`筛选。
 - `/api/v1/sources/preview`、`POST /api/v1/sources`和`/api/v1/manual-sources`：批量 URL 整理、手工来源登记和状态查询。
+- `/api/v1/social-intelligence`：老板面板使用的小红书公开业务情报和数据可用状态。
 - `/api/brief.json`中的`policy_change_digest`：仪表盘“逐条变化 / 国家汇总”视图使用的结构化汇总及可复制中文文本。
 - `policy-digests/`：日报、周报、月报和 latest 的 JSON、纯文本、Markdown 原子快照；TrendRadar HTML 报告和通知渠道直接读取这些文件。
 - `snapshots/<source-id>/<timestamp>-<hash>/`：压缩原文、完整正文、元数据和差异。

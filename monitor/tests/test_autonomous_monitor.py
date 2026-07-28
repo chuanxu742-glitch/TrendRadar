@@ -60,14 +60,20 @@ class AutonomousMonitorTests(unittest.TestCase):
             patcher.stop()
         self.temporary.cleanup()
 
-    def add_source(self, *, state: str = "active") -> SourceEndpoint:
+    def add_source(
+        self,
+        *,
+        state: str = "active",
+        role: str = "current-primary",
+        url: str = "https://air.test/pets",
+    ) -> SourceEndpoint:
         return self.store.upsert_source(
             SourceEndpoint(
                 id="source-one",
-                canonical_url="https://air.test/pets",
+                canonical_url=url,
                 display_name="示例航司",
                 applies_to_entity_ids=("airline:test-air",),
-                role="current-primary",
+                role=role,
                 lifecycle_state=state,
                 enabled=state not in {"quarantined", "retired"},
                 metadata={
@@ -1078,6 +1084,35 @@ class AutonomousMonitorTests(unittest.TestCase):
         self.assertEqual(
             self.store.get_knowledge_update_proposal(proposal.id).status,
             "applied",
+        )
+
+    def test_knowledge_agent_leaves_candidate_source_for_explicit_review(self) -> None:
+        self.add_source(role="candidate")
+        _, proposal = self.add_knowledge_proposal("candidate-source")
+
+        result = official_monitor.knowledge_update_agent_once()
+
+        self.assertEqual(result["knowledge_applied"], 0)
+        self.assertEqual(result["knowledge_skipped"], 1)
+        self.assertEqual(
+            self.store.get_knowledge_update_proposal(proposal.id).status,
+            "proposed",
+        )
+
+    def test_knowledge_agent_never_auto_applies_xiaohongshu_source(self) -> None:
+        self.add_source(
+            role="current-primary",
+            url="https://www.xiaohongshu.com/explore/example",
+        )
+        _, proposal = self.add_knowledge_proposal("xiaohongshu-source")
+
+        result = official_monitor.knowledge_update_agent_once()
+
+        self.assertEqual(result["knowledge_applied"], 0)
+        self.assertEqual(result["knowledge_skipped"], 1)
+        self.assertEqual(
+            self.store.get_knowledge_update_proposal(proposal.id).status,
+            "proposed",
         )
 
     def test_knowledge_agent_skips_non_confirmed_revision(self) -> None:

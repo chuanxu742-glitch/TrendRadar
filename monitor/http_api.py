@@ -84,6 +84,14 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_error(500, f"brief unavailable: {exc}")
             return
+        if path == "/api/v1/social-intelligence":
+            try:
+                query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
+                limit = min(max(int(query.get("limit", "100") or 100), 1), 500)
+                self.send_json(om.social_intelligence_payload(limit=limit))
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
         if path == "/api/v1/policy-change-digest":
             try:
                 query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
