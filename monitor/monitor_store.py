@@ -789,21 +789,17 @@ class MonitorStore:
             )
         return self.get_source(endpoint.id)
 
-    def get_source(self, source_id: str) -> SourceEndpoint:
-        with self._lock:
-            row = self.connection.execute("SELECT * FROM source_endpoints WHERE id=?", (source_id,)).fetchone()
-            if row is None:
-                raise KeyError(source_id)
-            entity_rows = self.connection.execute(
-                "SELECT entity_id FROM source_entity_links WHERE source_id=? AND relation='applies_to' ORDER BY entity_id",
-                (source_id,),
-            ).fetchall()
+    @staticmethod
+    def _source_from_row(
+        row: Mapping[str, Any],
+        entity_ids: Sequence[str] = (),
+    ) -> SourceEndpoint:
         return SourceEndpoint(
             id=row["id"],
             canonical_url=row["canonical_url"],
             display_name=row["display_name"],
             owner_organization_id=row["owner_organization_id"],
-            applies_to_entity_ids=tuple(item[0] for item in entity_rows),
+            applies_to_entity_ids=tuple(entity_ids),
             role=row["role"],
             lifecycle_state=row["lifecycle_state"],
             enabled=bool(row["enabled"]),
@@ -814,6 +810,46 @@ class MonitorStore:
             retirement_reason=row["retirement_reason"],
             metadata=json.loads(row["metadata_json"]),
         )
+
+    def _sources_from_rows(self, rows: Sequence[Mapping[str, Any]]) -> list[SourceEndpoint]:
+        if not rows:
+            return []
+        source_ids = [str(row["id"]) for row in rows]
+        entity_ids: dict[str, list[str]] = {source_id: [] for source_id in source_ids}
+        with self._lock:
+            for index in range(0, len(source_ids), 500):
+                chunk = source_ids[index:index + 500]
+                links = self.connection.execute(
+                    f"""
+                    SELECT source_id, entity_id
+                    FROM source_entity_links
+                    WHERE relation='applies_to'
+                      AND source_id IN ({','.join('?' for _ in chunk)})
+                    ORDER BY source_id, entity_id
+                    """,
+                    chunk,
+                ).fetchall()
+                for link in links:
+                    entity_ids[str(link["source_id"])].append(str(link["entity_id"]))
+        return [
+            self._source_from_row(row, entity_ids[str(row["id"])])
+            for row in rows
+        ]
+
+    def get_source(self, source_id: str) -> SourceEndpoint:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM source_endpoints WHERE id=?",
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(source_id)
+            entity_rows = self.connection.execute(
+                "SELECT entity_id FROM source_entity_links "
+                "WHERE source_id=? AND relation='applies_to' ORDER BY entity_id",
+                (source_id,),
+            ).fetchall()
+        return self._source_from_row(row, [str(item[0]) for item in entity_rows])
 
     def list_sources(
         self,
@@ -846,12 +882,12 @@ class MonitorStore:
         with self._lock:
             rows = self.connection.execute(
                 f"""
-                SELECT id FROM source_endpoints {where}
+                SELECT * FROM source_endpoints {where}
                 ORDER BY role, lifecycle_state, id LIMIT ? OFFSET ?
                 """,
                 values,
             ).fetchall()
-        return [self.get_source(row["id"]) for row in rows]
+        return self._sources_from_rows(rows)
 
     def count_sources(
         self,
@@ -889,7 +925,7 @@ class MonitorStore:
         with self._lock:
             rows = self.connection.execute(
                 """
-                SELECT id FROM source_endpoints
+                SELECT * FROM source_endpoints
                 WHERE enabled=1 AND lifecycle_state != 'retired'
                   AND (next_due_at IS NULL OR next_due_at <= ?)
                 ORDER BY CASE role
@@ -900,7 +936,7 @@ class MonitorStore:
                 """,
                 (due_at, limit),
             ).fetchall()
-            return [self.get_source(row[0]) for row in rows]
+        return self._sources_from_rows(rows)
 
     def transition_source(
         self,

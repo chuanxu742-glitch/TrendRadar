@@ -69,6 +69,32 @@ class DashboardContractTests(unittest.TestCase):
         for fake_link in ('href="#"', "href='#'", 'href=""', "href=''"):
             self.assertNotIn(fake_link, self.dashboard)
 
+    def test_dashboard_supports_safe_single_and_batch_source_intake(self) -> None:
+        for marker in (
+            'id="sourceButton"',
+            'id="sourceDialog"',
+            'id="sourceInput"',
+            'id="sourceCheck"',
+            'id="sourceAi"',
+            'id="sourceImport"',
+            'id="sourceUndo"',
+            'id="sourcePreviewRows"',
+            'id="manualSourceList"',
+            'postJson("/api/v1/sources/preview"',
+            'postJson("/api/v1/sources"',
+            "/api/v1/source-intake/batches/",
+            "每批最多 200 个",
+            "AI 只整理名称，不会改写或编造网址",
+        ):
+            self.assertIn(marker, self.dashboard)
+        for unsafe_sink in (
+            ".innerHTML",
+            ".outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+        ):
+            self.assertNotIn(unsafe_sink, self.dashboard)
+
     @staticmethod
     def primary_state(status: str, now: str) -> dict[str, object]:
         return {

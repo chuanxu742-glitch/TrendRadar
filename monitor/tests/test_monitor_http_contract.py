@@ -174,6 +174,112 @@ class MonitorHttpContractTests(unittest.TestCase):
         self.assertIsNone(second["next_offset"])
         self.assertIs(second["has_more"], False)
 
+    def test_source_preview_extracts_batch_without_mutating_sources(self) -> None:
+        status, payload = self.post_json(
+            "/api/v1/sources/preview",
+            {
+                "input": (
+                    "CDC https://www.cdc.gov/importation/dogs/\n"
+                    "AVS nparks.gov.sg/avs/pets"
+                ),
+                "use_ai": False,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["valid_count"], 2)
+        self.assertEqual(self.store.count_sources(), 0)
+
+    def test_batch_source_import_is_persisted_and_listed_as_manual(self) -> None:
+        status, payload = self.post_json(
+            "/api/v1/sources",
+            {
+                "items": [
+                    {
+                        "url": "https://example.gov/pet-import",
+                        "name": "示例宠物入境政策",
+                    },
+                    {"url": "https://example.gov/pet-export"},
+                ]
+            },
+        )
+        manual = self.fetch_json("/api/v1/manual-sources")
+
+        self.assertEqual(status, 201)
+        self.assertEqual(payload["added"], 2)
+        self.assertEqual(manual["count"], 2)
+        self.assertTrue(all(
+            item["role"] == "candidate" for item in manual["items"]
+        ))
+        self.assertTrue(all(
+            item["metadata"]["source_origin"] == "manual"
+            for item in manual["items"]
+        ))
+
+    def test_manual_source_batch_can_be_undone_idempotently(self) -> None:
+        _, created = self.post_json(
+            "/api/v1/sources",
+            {"items": [{"url": "https://example.gov/pets"}]},
+        )
+        path = (
+            "/api/v1/source-intake/batches/"
+            f"{created['batch_id']}/actions"
+        )
+
+        status, first = self.post_json(path, {"action": "undo"})
+        _, second = self.post_json(path, {"action": "undo"})
+        source = self.store.get_source(created["items"][0]["source_id"])
+
+        self.assertEqual(status, 200)
+        self.assertEqual(first["retired"], 1)
+        self.assertEqual(second["retired"], 0)
+        self.assertEqual(source.lifecycle_state, "retired")
+        self.assertFalse(source.enabled)
+
+    def test_private_source_import_is_rejected(self) -> None:
+        status, payload = self.post_json(
+            "/api/v1/sources",
+            {"input": "http://127.0.0.1/pets"},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("no URL", payload["error"])
+        self.assertEqual(self.store.count_sources(), 0)
+
+    def test_source_import_rejects_more_than_batch_limit(self) -> None:
+        status, payload = self.post_json(
+            "/api/v1/sources",
+            {
+                "items": [
+                    {"url": f"https://example{index}.gov/pets"}
+                    for index in range(201)
+                ]
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("exceeds 200", payload["error"])
+        self.assertEqual(self.store.count_sources(), 0)
+
+    def test_cross_origin_source_change_is_rejected(self) -> None:
+        request = urllib.request.Request(
+            f"{self.base_url}/api/v1/sources",
+            data=json.dumps({
+                "items": [{"url": "https://example.gov/pets"}]
+            }).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "https://attacker.example",
+            },
+            method="POST",
+        )
+
+        with self.assertRaises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(request, timeout=5)
+
+        self.assertEqual(captured.exception.code, 400)
+        self.assertEqual(self.store.count_sources(), 0)
+
     def test_site_url_inventory_supports_filters_pagination_and_summary(self) -> None:
         records = {
             "https://air.test/pets": {

@@ -12,6 +12,20 @@
 8. 候选页面连续验证通过后进入来源注册表；无关页面保留审计记录但退出持续监控。
 9. 变化事件写入 RSS，供 TrendRadar 消费；业务页面只展示确认后的政策条款变化。
 
+## 手工与批量添加数据源
+
+- 仪表盘右上角“添加数据源”只要求填写 URL，支持单个 URL、每行一个、Excel 复制内容和夹杂说明文字的批量输入。
+- 固定规则先提取、规范化、去重并拦截本机、内网、登录、搜索和静态资源地址；每批最多处理 200 个 URL。
+- “AI 整理”只为已提取 URL 补充显示名称，模型返回的新 URL 不会被接受；未配置 AI 或模型失败时自动使用确定性结果。
+- 新增来源以 `candidate/discovered` 状态写入 `monitor.db`，同时登记为高相关全站 URL，并立即加入到期队列。
+- 每次成功导入返回批次编号，页面可将该批新增来源一次性软退役；URL 审计记录继续保留。
+- 手工来源默认执行“重点监控该页面 + 同域全站发现”，不会因为下一次知识库来源同步而被删除。
+- `/api/v1/sources/preview`：预览批量输入和 AI 整理结果。
+- `POST /api/v1/sources`：批量登记验证通过的 URL。
+- `/api/v1/manual-sources`：查询手工添加来源及生命周期状态。
+- `MONITOR_SOURCE_INTAKE_AI_ENABLED`控制格式整理助手，默认`true`。
+- `MONITOR_SOURCE_INTAKE_AI_TIMEOUT`和`MONITOR_SOURCE_INTAKE_AI_HARD_TIMEOUT`默认分别为30秒和45秒。
+
 ## 通用站点发现
 
 - 默认使用Katana v1.6.1作为URL发现引擎；Katana缺失、超时或未返回URL时自动降级到内置发现器。
@@ -100,6 +114,7 @@
 - `events.json` / `feed.xml`：内容变化、失效、恢复和页面迁移事件。
 - `/api/v1/policy-change-digest`：按国家、地区或航司汇总通过完整证据链校验的当前有效修订；支持`from`、`to`、`kind`、`period=daily|weekly|monthly`、`format=json|text|markdown`和`limit`查询参数。
 - `/api/v1/site-url-inventory`：查询全站 URL 台账，支持按`origin`、`relevance`和`status`筛选。
+- `/api/v1/sources/preview`、`POST /api/v1/sources`和`/api/v1/manual-sources`：批量 URL 整理、手工来源登记和状态查询。
 - `/api/brief.json`中的`policy_change_digest`：仪表盘“逐条变化 / 国家汇总”视图使用的结构化汇总及可复制中文文本。
 - `policy-digests/`：日报、周报、月报和 latest 的 JSON、纯文本、Markdown 原子快照；TrendRadar HTML 报告和通知渠道直接读取这些文件。
 - `snapshots/<source-id>/<timestamp>-<hash>/`：压缩原文、完整正文、元数据和差异。

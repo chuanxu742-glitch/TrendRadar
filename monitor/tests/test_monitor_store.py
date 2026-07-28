@@ -105,6 +105,31 @@ class MonitorStoreTests(unittest.TestCase):
             self.store.connection.execute("PRAGMA user_version").fetchone()[0], 3
         )
 
+    def test_list_sources_uses_batched_queries(self) -> None:
+        for index in range(3):
+            self.add_source(f"source-{index}")
+        statements: list[str] = []
+        self.store.connection.set_trace_callback(statements.append)
+
+        sources = self.store.list_sources(limit=100)
+
+        self.store.connection.set_trace_callback(None)
+        source_queries = [
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith("SELECT")
+            and "FROM source_endpoints" in statement
+        ]
+        entity_queries = [
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith("SELECT")
+            and "FROM source_entity_links" in statement
+        ]
+        self.assertEqual(len(sources), 3)
+        self.assertEqual(len(source_queries), 1)
+        self.assertEqual(len(entity_queries), 1)
+
     def test_v2_check_run_migration_preserves_rows_and_accepts_deferred_status(self) -> None:
         self.add_source(state="active")
         self.store.record_check_run(

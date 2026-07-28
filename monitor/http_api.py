@@ -188,6 +188,27 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
             except (TypeError, ValueError) as exc:
                 self.send_json({"error": str(exc)}, 400)
             return
+        if path == "/api/v1/manual-sources":
+            try:
+                query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
+                limit = min(max(int(query.get("limit", "100") or 100), 1), 500)
+                offset = max(int(query.get("offset", "0") or 0), 0)
+                items, count = om.list_manual_sources(limit=limit, offset=offset)
+                next_offset = offset + len(items)
+                has_more = next_offset < count
+                self.send_json({
+                    "items": [om.source_api_item(item) for item in items],
+                    "count": count,
+                    "page_count": len(items),
+                    "offset": offset,
+                    "limit": limit,
+                    "next_offset": next_offset if has_more else None,
+                    "has_more": has_more,
+                    "ai_available": om.source_intake_ai_available(),
+                })
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
         if path == "/api/v1/sources":
             try:
                 query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
@@ -334,11 +355,60 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
             raise ValueError("request body must be a JSON object")
         return payload
 
+    def _require_local_json_write(self) -> None:
+        content_type = str(self.headers.get("Content-Type") or "").lower()
+        if not content_type.startswith("application/json"):
+            raise ValueError("Content-Type must be application/json")
+        origin = str(self.headers.get("Origin") or "").strip()
+        if not origin:
+            return
+        origin_host = (urlsplit(origin).hostname or "").lower()
+        request_host = str(self.headers.get("Host") or "").split(":", 1)[0].lower()
+        if origin_host not in {"localhost", "127.0.0.1", "::1", request_host}:
+            raise ValueError("cross-origin source changes are not allowed")
+
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
         try:
             payload = self._read_json_body()
             actor = str(payload.get("actor") or "local-operator")
+            if path == "/api/v1/sources/preview":
+                self._require_local_json_write()
+                self.send_json(om.preview_manual_source_input(
+                    payload.get("input", ""),
+                    use_ai=bool(payload.get("use_ai")),
+                ))
+                return
+            if path == "/api/v1/sources":
+                self._require_local_json_write()
+                items = payload.get("items")
+                if not isinstance(items, list):
+                    preview = om.preview_manual_source_input(
+                        payload.get("input", ""),
+                        use_ai=bool(payload.get("use_ai")),
+                    )
+                    items = [
+                        item
+                        for item in preview.get("items", [])
+                        if item.get("status") == "valid"
+                    ]
+                result = om.import_manual_sources(items, actor=actor)
+                self.send_json(result, 201 if result.get("added") else 200)
+                return
+            batch_match = re.fullmatch(
+                r"/api/v1/source-intake/batches/([^/]+)/actions",
+                path,
+            )
+            if batch_match:
+                self._require_local_json_write()
+                action = str(payload.get("action") or "").lower()
+                if action != "undo":
+                    raise ValueError("unsupported source intake batch action")
+                self.send_json(om.undo_manual_source_batch(
+                    unquote(batch_match.group(1)),
+                    actor=actor,
+                ))
+                return
             review_match = re.fullmatch(r"/api/v1/review-tasks/([^/]+)/actions", path)
             if review_match:
                 task_id = unquote(review_match.group(1))
