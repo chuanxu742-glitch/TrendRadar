@@ -1,4 +1,36 @@
 services:
+  xhs-monitor:
+    build:
+      context: ..
+      dockerfile: xhs_monitor/Dockerfile
+    image: trendradar-xhs-monitor:local
+    container_name: trendradar-xhs-monitor
+    restart: unless-stopped
+    init: true
+
+    volumes:
+      - ../config:/app/config:ro
+      - ../output/xhs-monitor:/app/state
+
+    environment:
+      - TZ=Asia/Shanghai
+      - XHS_ENABLED=${XHS_ENABLED:-true}
+      - XHS_COOKIE=${XHS_COOKIE:-}
+      - XHS_COOKIE_FILE=${XHS_COOKIE_FILE:-config/xhs_cookie.txt}
+      - XHS_PROXY_URL=${XHS_PROXY_URL:-}
+      - XHS_MONITOR_INTERVAL=${XHS_MONITOR_INTERVAL:-1800}
+      - XHS_IMMEDIATE_RUN=${XHS_IMMEDIATE_RUN:-true}
+      - XHS_MONITOR_CONFIG=/app/config/xhs-monitor.yaml
+      - XHS_MONITOR_DATABASE=/app/state/xhs-monitor.db
+      - XHS_MONITOR_PORT=8091
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health/live', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   official-monitor:
     build:
       context: ../monitor
@@ -15,7 +47,6 @@ services:
     volumes:
       - ../monitor:/app/monitor:ro
       - ../config:/app/config:ro
-      - ../output/news:/app/output/news:ro
       - ../output/official-monitor:/app/state
 
     environment:
@@ -48,7 +79,8 @@ services:
       - MONITOR_HEALTH_MAX_STALE_SECONDS=${MONITOR_HEALTH_MAX_STALE_SECONDS:-1800}
       - MONITOR_INVENTORY=/app/state/knowledge_sources.json
       - MONITOR_DATABASE=/app/state/monitor.db
-      - MONITOR_NEWS_DIR=/app/output/news
+      - MONITOR_XHS_SUMMARY_URL=http://xhs-monitor:8091/api/v1/summary
+      - MONITOR_XHS_SUMMARY_TIMEOUT=${MONITOR_XHS_SUMMARY_TIMEOUT:-2}
       - MONITOR_PORT=8090
       - MONITOR_POLICY_DIGEST_ENABLED=${MONITOR_POLICY_DIGEST_ENABLED:-true}
       - MONITOR_AI_SUMMARY_ENABLED=${MONITOR_AI_SUMMARY_ENABLED:-true}
@@ -167,11 +199,8 @@ services:
       - AI_API_KEY=${AI_API_KEY:-}
       - AI_MODEL=${AI_MODEL:-}
       - AI_API_BASE=${AI_API_BASE:-}
-      # 小红书固定关键词数据源（Cookie 仅通过环境变量传入）
-      - XHS_ENABLED=${XHS_ENABLED:-}
-      - XHS_COOKIE=${XHS_COOKIE:-}
-      - XHS_COOKIE_FILE=${XHS_COOKIE_FILE:-config/xhs_cookie.txt}
-      - XHS_PROXY_URL=${XHS_PROXY_URL:-}
+      # 小红书由独立 xhs-monitor 服务采集，主服务不接触登录凭据
+      - XHS_ENABLED=false
       # 远程存储配置（S3 兼容协议）
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-}

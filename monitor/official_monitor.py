@@ -121,9 +121,9 @@ except ImportError:
     )
 
 try:
-    from .social_intelligence import load_xiaohongshu_intelligence
+    from .social_intelligence import fetch_xiaohongshu_intelligence
 except ImportError:
-    from social_intelligence import load_xiaohongshu_intelligence
+    from social_intelligence import fetch_xiaohongshu_intelligence
 
 try:
     from .scrapling_fetch import BrowserFetchBudget, ScraplingAdaptiveFetcher
@@ -145,7 +145,14 @@ serve = _http_api.serve
 CONFIG_PATH = Path(os.getenv("MONITOR_CONFIG", "/app/monitor/sources.yaml"))
 STATE_DIR = Path(os.getenv("MONITOR_STATE_DIR", "/app/state"))
 INVENTORY_PATH = Path(os.getenv("MONITOR_INVENTORY", "/app/state/knowledge_sources.json"))
-NEWS_DIR = Path(os.getenv("MONITOR_NEWS_DIR", "/app/output/news"))
+XHS_SUMMARY_URL = os.getenv(
+    "MONITOR_XHS_SUMMARY_URL",
+    "http://xhs-monitor:8091/api/v1/summary",
+)
+XHS_SUMMARY_TIMEOUT = max(
+    float(os.getenv("MONITOR_XHS_SUMMARY_TIMEOUT", "2")),
+    0.1,
+)
 PORT = int(os.getenv("MONITOR_PORT", "8090"))
 MONITOR_INTERVAL = max(int(os.getenv("MONITOR_INTERVAL", "900")), 30)
 BATCH_SIZE = int(os.getenv("MONITOR_BATCH_SIZE", "75"))
@@ -2701,7 +2708,11 @@ def sync_policy_change_ledger(
 
 
 def social_intelligence_payload(*, limit: int = 100) -> dict[str, Any]:
-    return load_xiaohongshu_intelligence(NEWS_DIR, limit=limit)
+    return fetch_xiaohongshu_intelligence(
+        XHS_SUMMARY_URL,
+        limit=limit,
+        timeout=XHS_SUMMARY_TIMEOUT,
+    )
 
 
 def dashboard_payload() -> dict[str, Any]:

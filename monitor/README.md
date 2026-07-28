@@ -18,10 +18,11 @@
 - 页面不展示积压、并发、熔断或 `degraded` 等运维状态；这些指标仍保留在健康接口供内部诊断。
 - `current-primary` 和 `trusted-secondary` 官网来源在快照、差异和证据链全部验证通过后，可以自动形成并应用版本化知识更新。
 - 候选来源、手工新增但尚未验证的来源和小红书内容只能形成情报或待确认提案，不能自动改写政策事实。
-- 小红书情报从 TrendRadar 每日新闻 SQLite 只读接入；页面只展示公开搜索结果和业务可用状态，不暴露 Cookie、登录或错误细节。
+- 小红书由独立 `xhs-monitor` 服务采集并写入自己的 SQLite；8090 只读取其摘要 API，不接触 Cookie、代理或采集错误。
+- `xhs-monitor` 不提供第二个业务面板；服务暂时不可用时，8090 只显示“今日数据暂未更新”，不影响官网监控。
 - 每次官网知识更新都保留来源、修订、证据和历史版本，可以回滚。
 - `/api/v1/social-intelligence`：查询统一面板使用的小红书业务情报。
-- `MONITOR_NEWS_DIR`：TrendRadar 每日新闻 SQLite 目录，容器默认 `/app/output/news`。
+- `MONITOR_XHS_SUMMARY_URL`：独立服务摘要接口，容器默认 `http://xhs-monitor:8091/api/v1/summary`。
 
 ## 手工与批量添加数据源
 

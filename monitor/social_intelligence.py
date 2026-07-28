@@ -1,53 +1,33 @@
 from __future__ import annotations
 
-import re
-import sqlite3
-from contextlib import closing
-from datetime import datetime
-from pathlib import Path
+import json
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 
-XHS_SOURCE_PATTERN = "xhs-%"
-MAX_DATABASE_FILES = 31
-_NOTE_ID_SUFFIX = re.compile(r"\s+\[[0-9A-Za-z_-]{8}\]\s*$")
-_DATE_STEM = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+VALID_STATUSES = {"available", "partial", "unavailable", "not_configured"}
+STATUS_LABELS = {
+    "available": "今日已更新",
+    "partial": "部分关键词已更新",
+    "unavailable": "今日数据暂未更新",
+    "not_configured": "尚未接入数据",
+}
 
 
-def _database_paths(news_dir: Path) -> list[Path]:
-    if not news_dir.is_dir():
-        return []
-    paths = [
-        path
-        for path in news_dir.glob("*.db")
-        if path.is_file() and _DATE_STEM.fullmatch(path.stem)
-    ]
-    return sorted(paths, key=lambda path: path.stem, reverse=True)[:MAX_DATABASE_FILES]
-
-
-def _connect_read_only(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(
-        f"{path.resolve().as_uri()}?mode=ro",
-        uri=True,
-        timeout=1,
-    )
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only=ON")
-    return connection
-
-
-def _observed_at(day: str, crawl_time: str, created_at: str = "") -> str:
-    normalized = str(crawl_time or "").strip().replace("-", ":")
-    if re.fullmatch(r"\d{2}:\d{2}", normalized):
-        return f"{day}T{normalized}:00+08:00"
-    created = str(created_at or "").strip()
-    if created:
-        try:
-            return datetime.fromisoformat(created).isoformat()
-        except ValueError:
-            pass
-    return f"{day}T00:00:00+08:00"
+def unavailable_payload() -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "status_label": "今日数据暂未更新",
+        "source_count": 0,
+        "successful_sources": 0,
+        "failed_sources": 0,
+        "updated_at": "",
+        "today_count": 0,
+        "recent_count": 0,
+        "items": [],
+    }
 
 
 def _safe_note_url(value: Any) -> str:
@@ -66,151 +46,82 @@ def _safe_note_url(value: Any) -> str:
     return candidate
 
 
-def _source_states(connection: sqlite3.Connection, day: str) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """
-        SELECT p.id, p.name, css.status, cr.crawl_time, cr.created_at
-        FROM crawl_source_status css
-        JOIN crawl_records cr ON cr.id=css.crawl_record_id
-        JOIN platforms p ON p.id=css.platform_id
-        WHERE p.id LIKE ?
-          AND css.crawl_record_id=(
-              SELECT MAX(css_latest.crawl_record_id)
-              FROM crawl_source_status css_latest
-              WHERE css_latest.platform_id=css.platform_id
-          )
-        ORDER BY p.id
-        """,
-        (XHS_SOURCE_PATTERN,),
-    ).fetchall()
-    return [
-        {
-            "source_id": str(row["id"]),
-            "name": str(row["name"] or row["id"]),
-            "status": str(row["status"]),
-            "updated_at": _observed_at(
-                day,
-                str(row["crawl_time"] or ""),
-                str(row["created_at"] or ""),
-            ),
-        }
-        for row in rows
-    ]
+def _integer(value: Any) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
-def _items(
-    connection: sqlite3.Connection,
-    day: str,
-    *,
-    limit: int,
-) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """
-        SELECT n.platform_id, p.name AS source_name, n.title, n.rank, n.url,
-               n.first_crawl_time, n.last_crawl_time, n.updated_at
-        FROM news_items n
-        JOIN platforms p ON p.id=n.platform_id
-        WHERE n.platform_id LIKE ?
-        ORDER BY n.last_crawl_time DESC, n.rank ASC, n.id DESC
-        LIMIT ?
-        """,
-        (XHS_SOURCE_PATTERN, max(limit, 1)),
-    ).fetchall()
-    return [
-        {
-            "source_id": str(row["platform_id"]),
-            "source_name": str(row["source_name"] or row["platform_id"]),
-            "title": _NOTE_ID_SUFFIX.sub("", str(row["title"] or "")).strip(),
-            "rank": int(row["rank"] or 0),
-            "url": _safe_note_url(row["url"]),
-            "first_seen_at": _observed_at(
-                day,
-                str(row["first_crawl_time"] or ""),
-                str(row["updated_at"] or ""),
-            ),
-            "last_seen_at": _observed_at(
-                day,
-                str(row["last_crawl_time"] or ""),
-                str(row["updated_at"] or ""),
-            ),
-        }
-        for row in rows
-        if str(row["title"] or "").strip()
-    ]
+def _summary_url(url: str, limit: int) -> str:
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["limit"] = str(min(max(int(limit), 1), 500))
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
 
 
-def load_xiaohongshu_intelligence(
-    news_dir: Path,
-    *,
-    limit: int = 100,
-) -> dict[str, Any]:
-    """Read boss-facing Xiaohongshu signals without exposing session details."""
+def _normalize_payload(payload: Any, *, limit: int) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("summary response must be an object")
+    status = str(payload.get("status") or "")
+    if status not in VALID_STATUSES:
+        raise ValueError("summary response has invalid status")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        raise ValueError("summary response items must be a list")
 
-    requested_limit = min(max(int(limit), 1), 500)
-    sources: list[dict[str, Any]] = []
-    collected: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    latest_database_day = ""
-
-    for path in _database_paths(news_dir):
-        day = path.stem
-        try:
-            with closing(_connect_read_only(path)) as connection:
-                current_sources = _source_states(connection, day)
-                if current_sources and not sources:
-                    sources = current_sources
-                    latest_database_day = day
-                remaining = requested_limit - len(collected)
-                if remaining <= 0:
-                    continue
-                for item in _items(connection, day, limit=remaining * 2):
-                    identity = (
-                        f"{item['source_id']}|{item['url']}"
-                        if item["url"]
-                        else f"{item['source_id']}|{item['title']}"
-                    )
-                    if identity in seen:
-                        continue
-                    seen.add(identity)
-                    collected.append(item)
-                    if len(collected) >= requested_limit:
-                        break
-        except (OSError, sqlite3.Error):
+    items: list[dict[str, Any]] = []
+    for raw in raw_items[:limit]:
+        if not isinstance(raw, dict):
             continue
+        title = str(raw.get("title") or "").strip()
+        if not title:
+            continue
+        items.append(
+            {
+                "source_id": str(raw.get("source_id") or ""),
+                "source_name": str(raw.get("source_name") or "小红书"),
+                "title": title,
+                "rank": _integer(raw.get("rank")),
+                "url": _safe_note_url(raw.get("url")),
+                "first_seen_at": str(raw.get("first_seen_at") or ""),
+                "last_seen_at": str(raw.get("last_seen_at") or ""),
+            }
+        )
 
-    successful = sum(item["status"] == "success" for item in sources)
-    failed = sum(item["status"] == "failed" for item in sources)
-    if not sources:
-        status = "not_configured"
-        status_label = "尚未接入数据"
-    elif successful and failed:
-        status = "partial"
-        status_label = "部分关键词已更新"
-    elif successful:
-        status = "available"
-        status_label = "今日已更新"
-    else:
-        status = "unavailable"
-        status_label = "今日数据暂未更新"
-
-    today = datetime.now().astimezone().date().isoformat()
-    today_count = sum(
-        str(item.get("last_seen_at") or "").startswith(today)
-        for item in collected
-    )
-    updated_at = max(
-        (str(item.get("updated_at") or "") for item in sources),
-        default="",
-    )
     return {
         "status": status,
-        "status_label": status_label,
-        "source_count": len(sources),
-        "successful_sources": successful,
-        "failed_sources": failed,
-        "latest_database_day": latest_database_day,
-        "updated_at": updated_at,
-        "today_count": today_count,
-        "recent_count": len(collected),
-        "items": collected,
+        "status_label": STATUS_LABELS[status],
+        "source_count": _integer(payload.get("source_count")),
+        "successful_sources": _integer(payload.get("successful_sources")),
+        "failed_sources": _integer(payload.get("failed_sources")),
+        "updated_at": str(payload.get("updated_at") or ""),
+        "today_count": _integer(payload.get("today_count")),
+        "recent_count": len(items),
+        "items": items,
     }
+
+
+def fetch_xiaohongshu_intelligence(
+    summary_url: str,
+    *,
+    limit: int = 100,
+    timeout: float = 2.0,
+) -> dict[str, Any]:
+    """Read the independent collector's boss-safe summary API."""
+
+    requested_limit = min(max(int(limit), 1), 500)
+    try:
+        request = Request(
+            _summary_url(summary_url, requested_limit),
+            headers={"Accept": "application/json"},
+        )
+        with urlopen(request, timeout=max(float(timeout), 0.1)) as response:
+            if response.status != 200:
+                return unavailable_payload()
+            payload = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
+        return _normalize_payload(payload, limit=requested_limit)
+    except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError):
+        return unavailable_payload()

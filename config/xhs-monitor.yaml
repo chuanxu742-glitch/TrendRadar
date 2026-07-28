@@ -1,0 +1,16 @@
+xiaohongshu:
+  enabled: true
+  limit_per_keyword: 20
+  sort: "latest"
+  note_type: "all"
+  note_time: "day"
+  request_interval_seconds:
+    min: 15
+    max: 30
+  keywords:
+    - id: "service-dog-cabin-refused"
+      query: "服务犬进客舱被拒载"
+      name: "小红书·服务犬进客舱被拒载"
+    - id: "pet-cabin-refused"
+      query: "宠物进客舱被拒载"
+      name: "小红书·宠物进客舱被拒载"
