@@ -172,6 +172,84 @@ class MonitorHttpContractTests(unittest.TestCase):
         self.assertEqual(response, expected)
         payload.assert_called_once_with(limit=20)
 
+    def test_xhs_settings_and_login_are_proxied_without_credentials(self) -> None:
+        expected_settings = {
+            "keywords": [
+                {
+                    "id": "pet-cabin",
+                    "query": "宠物进客舱",
+                    "name": "小红书·宠物进客舱",
+                    "enabled": True,
+                }
+            ],
+            "interval_minutes": 30,
+            "credential_saved": False,
+        }
+        with (
+            mock.patch.object(
+                official_monitor,
+                "xiaohongshu_settings_payload",
+                return_value=expected_settings,
+            ),
+            mock.patch.object(
+                official_monitor,
+                "xiaohongshu_login_status_payload",
+                return_value={
+                    "status": "idle",
+                    "status_label": "尚未开始登录",
+                    "qr_image": "",
+                    "expires_at": "",
+                },
+            ),
+        ):
+            settings = self.fetch_json("/api/v1/xhs/settings")
+            login = self.fetch_json("/api/v1/xhs/login/status")
+
+        self.assertEqual(settings, expected_settings)
+        self.assertEqual(login["status"], "idle")
+        self.assertNotIn("cookie", str(settings).lower())
+        self.assertNotIn("cookie", str(login).lower())
+
+    def test_xhs_keyword_save_and_login_start_require_local_json_write(self) -> None:
+        saved = {
+            "keywords": [{"id": "pet", "query": "宠物", "name": "小红书·宠物"}],
+            "credential_saved": False,
+            "interval_minutes": 30,
+        }
+        started = {
+            "status": "waiting_scan",
+            "status_label": "请使用小红书 App 扫码确认",
+            "qr_image": "data:image/svg+xml;base64,PHN2Zy8+",
+            "expires_at": "123",
+        }
+        with (
+            mock.patch.object(
+                official_monitor,
+                "update_xiaohongshu_settings",
+                return_value=saved,
+            ) as update,
+            mock.patch.object(
+                official_monitor,
+                "start_xiaohongshu_login",
+                return_value=started,
+            ) as start,
+        ):
+            settings_status, settings = self.post_json(
+                "/api/v1/xhs/settings",
+                {"keywords": [{"query": "宠物"}]},
+            )
+            login_status, login = self.post_json(
+                "/api/v1/xhs/login/start",
+                {},
+            )
+
+        self.assertEqual(settings_status, 200)
+        self.assertEqual(login_status, 200)
+        self.assertEqual(settings, saved)
+        self.assertEqual(login, started)
+        update.assert_called_once_with([{"query": "宠物"}])
+        start.assert_called_once_with()
+
     def test_sources_count_is_filtered_total_not_page_size(self) -> None:
         self.add_sources(3)
 

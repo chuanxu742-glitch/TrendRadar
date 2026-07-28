@@ -15,12 +15,13 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - XHS_ENABLED=${XHS_ENABLED:-true}
-      - XHS_COOKIE_FILE=${XHS_COOKIE_FILE:-config/xhs_cookie.txt}
+      - XHS_COOKIE_FILE=/app/state/xhs_cookie.txt
       - XHS_PROXY_URL=${XHS_PROXY_URL:-}
       - XHS_MONITOR_INTERVAL=${XHS_MONITOR_INTERVAL:-1800}
       - XHS_IMMEDIATE_RUN=${XHS_IMMEDIATE_RUN:-true}
       - XHS_MONITOR_CONFIG=/app/config/xhs-monitor.yaml
       - XHS_MONITOR_DATABASE=/app/state/xhs-monitor.db
+      - XHS_MONITOR_SETTINGS=/app/state/settings.json
       - XHS_MONITOR_PORT=8091
 
     healthcheck:
@@ -39,11 +40,11 @@ services:
     tty: true
 
     volumes:
-      - ../config:/app/config
+      - ../output/xhs-monitor:/app/state
 
     environment:
       - TZ=Asia/Shanghai
-      - XHS_COOKIE_FILE=/app/config/xhs_cookie.txt
+      - XHS_COOKIE_FILE=/app/state/xhs_cookie.txt
 
   official-monitor:
     build:

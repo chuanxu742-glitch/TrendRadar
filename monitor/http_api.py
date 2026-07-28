@@ -92,6 +92,18 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
             except (TypeError, ValueError) as exc:
                 self.send_json({"error": str(exc)}, 400)
             return
+        if path == "/api/v1/xhs/settings":
+            try:
+                self.send_json(om.xiaohongshu_settings_payload())
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 503)
+            return
+        if path == "/api/v1/xhs/login/status":
+            try:
+                self.send_json(om.xiaohongshu_login_status_payload())
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 503)
+            return
         if path == "/api/v1/policy-change-digest":
             try:
                 query = dict(parse_qsl(urlsplit(self.path).query, keep_blank_values=True))
@@ -380,6 +392,16 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
         try:
             payload = self._read_json_body()
             actor = str(payload.get("actor") or "local-operator")
+            if path == "/api/v1/xhs/settings":
+                self._require_local_json_write()
+                self.send_json(
+                    om.update_xiaohongshu_settings(payload.get("keywords"))
+                )
+                return
+            if path == "/api/v1/xhs/login/start":
+                self._require_local_json_write()
+                self.send_json(om.start_xiaohongshu_login())
+                return
             if path == "/api/v1/sources/preview":
                 self._require_local_json_write()
                 self.send_json(om.preview_manual_source_input(

@@ -4,12 +4,13 @@ import json
 import io
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from xhs_monitor.login import qrcode_login
 from xhs_monitor.service import (
@@ -20,6 +21,8 @@ from xhs_monitor.service import (
     load_settings,
 )
 from xhs_monitor.store import XiaohongshuStore
+from xhs_monitor.settings import load_managed_keywords
+from xhs_monitor.web_login import LoginSessionManager
 from http.server import ThreadingHTTPServer
 
 
@@ -80,6 +83,15 @@ class FakeLoginApi:
 
     def cookies_to_str(self, _cookies):
         return "private-session-value"
+
+
+class BlockingLoginApi(FakeLoginApi):
+    def __init__(self) -> None:
+        self.release = threading.Event()
+
+    def check_qrcode_status(self, _qr_id, _code, cookies):
+        self.release.wait(timeout=2)
+        return True, "登录成功", cookies
 
 
 class XiaohongshuMonitorTests(unittest.TestCase):
@@ -264,6 +276,108 @@ xiaohongshu:
 
         self.assertEqual(len(collected), 1)
         self.assertEqual(collected[0].fetcher_config["COOKIE"], "new-session")
+
+    def test_settings_and_web_login_api_are_safe_and_persistent(self) -> None:
+        settings_path = self.root / "settings.json"
+        cookie_path = self.root / "xhs_cookie.txt"
+        base_settings = replace(
+            self.settings,
+            settings_path=settings_path,
+            cookie_file=cookie_path,
+            fetcher_config={
+                **self.settings.fetcher_config,
+                "COOKIE": "",
+            },
+        )
+
+        def settings_loader():
+            managed = load_managed_keywords(settings_path)
+            keywords = managed if managed is not None else base_settings.keywords
+            cookie = cookie_path.read_text(encoding="utf-8") if cookie_path.exists() else ""
+            return replace(
+                base_settings,
+                keywords=keywords,
+                fetcher_config={
+                    **base_settings.fetcher_config,
+                    "COOKIE": cookie,
+                    "KEYWORDS": keywords,
+                },
+            )
+
+        login_api = BlockingLoginApi()
+        login_manager = LoginSessionManager(
+            cookie_path,
+            api_loader=lambda: login_api,
+            poll_seconds=0.1,
+        )
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            build_handler(
+                self.store,
+                settings_loader=settings_loader,
+                login_manager=login_manager,
+            ),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            settings_request = Request(
+                f"{base_url}/api/v1/settings",
+                data=json.dumps(
+                    {
+                        "keywords": [
+                            {"query": "宠物进客舱"},
+                            {"query": "宠物进客舱"},
+                            {"query": "服务犬"},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(settings_request, timeout=2) as response:
+                settings = json.load(response)
+
+            self.assertEqual(
+                [item["query"] for item in settings["keywords"]],
+                ["宠物进客舱", "服务犬"],
+            )
+            self.assertFalse(settings["credential_saved"])
+            self.assertEqual(
+                [item["query"] for item in load_managed_keywords(settings_path) or []],
+                ["宠物进客舱", "服务犬"],
+            )
+
+            login_request = Request(
+                f"{base_url}/api/v1/login/start",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(login_request, timeout=2) as response:
+                login = json.load(response)
+
+            self.assertIn(login["status"], {"waiting_scan", "waiting_confirm"})
+            self.assertTrue(login["qr_image"].startswith("data:image/svg+xml;base64,"))
+            self.assertNotIn("private-session-value", str(login))
+
+            login_api.release.set()
+            for _ in range(30):
+                if login_manager.status()["status"] == "success":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(login_manager.status()["status"], "success")
+            self.assertEqual(
+                cookie_path.read_text(encoding="utf-8"),
+                "private-session-value",
+            )
+        finally:
+            login_api.release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":

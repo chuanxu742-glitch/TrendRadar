@@ -17,8 +17,11 @@ docker compose -f docker/docker-compose.yml run --rm xhs-login
 ```
 
 终端显示二维码后，使用小红书 App 扫码确认。登录状态会写入被 Git 忽略的
-`config/xhs_cookie.txt`，独立采集服务会在 10 秒内发现更新并自动重新采集，
+`output/xhs-monitor/xhs_cookie.txt`，独立采集服务会在 10 秒内发现更新并自动重新采集，
 不需要手工复制 Cookie 或重启容器。
+
+也可以在 8090 页面“小红书业务情报”区域点击“配置小红书”，直接维护关键词
+并完成扫码登录。页面和摘要接口不会返回 Cookie。
 
 启动：
 

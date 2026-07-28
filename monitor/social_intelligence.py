@@ -62,6 +62,49 @@ def _summary_url(url: str, limit: int) -> str:
     )
 
 
+def _service_url(summary_url: str, path: str) -> str:
+    parsed = urlsplit(summary_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("小红书服务地址无效")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def request_xiaohongshu_service(
+    summary_url: str,
+    path: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    content = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(
+        _service_url(summary_url, path),
+        data=content,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urlopen(request, timeout=max(float(timeout), 0.1)) as response:
+            result = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
+    except HTTPError as exc:
+        try:
+            error_payload = json.loads(exc.read(64 * 1024).decode("utf-8"))
+            message = str(error_payload.get("error") or "")
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            message = ""
+        raise ValueError(message[:200] or "小红书配置请求失败") from None
+    except (URLError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("小红书配置服务暂时不可用") from None
+    if not isinstance(result, dict):
+        raise ValueError("小红书配置服务返回异常")
+    return result
+
+
 def _normalize_payload(payload: Any, *, limit: int) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("summary response must be an object")

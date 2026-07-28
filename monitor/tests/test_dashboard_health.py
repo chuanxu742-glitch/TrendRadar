@@ -107,6 +107,22 @@ class DashboardContractTests(unittest.TestCase):
         ):
             self.assertNotIn(unsafe_sink, self.dashboard)
 
+    def test_dashboard_exposes_xhs_keyword_and_qr_login_configuration(self) -> None:
+        for marker in (
+            'id="xhsConfigButton"',
+            'id="xhsDialog"',
+            'id="xhsKeywordInput"',
+            'id="xhsSaveKeywords"',
+            'id="xhsLoginStart"',
+            'id="xhsQrImage"',
+            'postJson("/api/v1/xhs/settings"',
+            'postJson("/api/v1/xhs/login/start"',
+            'getJson("/api/v1/xhs/login/status"',
+            "二维码只在当前页面短暂显示",
+            "每行一个关键词，最多 50 个",
+        ):
+            self.assertIn(marker, self.dashboard)
+
     @staticmethod
     def primary_state(status: str, now: str) -> dict[str, object]:
         return {

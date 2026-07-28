@@ -1,6 +1,6 @@
 xiaohongshu:
   enabled: true
-  cookie_file: "config/xhs_cookie.txt"
+  cookie_file: "/app/state/xhs_cookie.txt"
   limit_per_keyword: 20
   sort: "latest"
   note_type: "all"

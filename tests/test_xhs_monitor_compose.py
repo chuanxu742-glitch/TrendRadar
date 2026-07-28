@@ -23,7 +23,14 @@ class XiaohongshuMonitorComposeTests(unittest.TestCase):
             services["xhs-login"]["entrypoint"],
             ["python", "-m", "xhs_monitor.login"],
         )
-        self.assertIn("../config:/app/config", services["xhs-login"]["volumes"])
+        self.assertIn(
+            "../output/xhs-monitor:/app/state",
+            services["xhs-login"]["volumes"],
+        )
+        self.assertIn(
+            "XHS_COOKIE_FILE=/app/state/xhs_cookie.txt",
+            xhs_environment,
+        )
         self.assertIn("XHS_ENABLED=false", main_environment)
         self.assertFalse(any(item.startswith("XHS_COOKIE=") for item in main_environment))
         self.assertIn(

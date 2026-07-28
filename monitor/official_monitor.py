@@ -121,9 +121,15 @@ except ImportError:
     )
 
 try:
-    from .social_intelligence import fetch_xiaohongshu_intelligence
+    from .social_intelligence import (
+        fetch_xiaohongshu_intelligence,
+        request_xiaohongshu_service,
+    )
 except ImportError:
-    from social_intelligence import fetch_xiaohongshu_intelligence
+    from social_intelligence import (
+        fetch_xiaohongshu_intelligence,
+        request_xiaohongshu_service,
+    )
 
 try:
     from .scrapling_fetch import BrowserFetchBudget, ScraplingAdaptiveFetcher
@@ -2712,6 +2718,44 @@ def social_intelligence_payload(*, limit: int = 100) -> dict[str, Any]:
         XHS_SUMMARY_URL,
         limit=limit,
         timeout=XHS_SUMMARY_TIMEOUT,
+    )
+
+
+def xiaohongshu_settings_payload() -> dict[str, Any]:
+    return request_xiaohongshu_service(
+        XHS_SUMMARY_URL,
+        "/api/v1/settings",
+        timeout=max(XHS_SUMMARY_TIMEOUT, 5),
+    )
+
+
+def update_xiaohongshu_settings(keywords: Any) -> dict[str, Any]:
+    if not isinstance(keywords, list):
+        raise ValueError("keywords 必须是列表")
+    return request_xiaohongshu_service(
+        XHS_SUMMARY_URL,
+        "/api/v1/settings",
+        method="POST",
+        payload={"keywords": keywords},
+        timeout=max(XHS_SUMMARY_TIMEOUT, 5),
+    )
+
+
+def xiaohongshu_login_status_payload() -> dict[str, Any]:
+    return request_xiaohongshu_service(
+        XHS_SUMMARY_URL,
+        "/api/v1/login/status",
+        timeout=max(XHS_SUMMARY_TIMEOUT, 5),
+    )
+
+
+def start_xiaohongshu_login() -> dict[str, Any]:
+    return request_xiaohongshu_service(
+        XHS_SUMMARY_URL,
+        "/api/v1/login/start",
+        method="POST",
+        payload={},
+        timeout=max(XHS_SUMMARY_TIMEOUT, 30),
     )
 
 
