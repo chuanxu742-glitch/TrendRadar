@@ -10,6 +10,7 @@ from contextlib import redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from xhs_monitor.login import qrcode_login
@@ -91,6 +92,21 @@ class BlockingLoginApi(FakeLoginApi):
 
     def check_qrcode_status(self, _qr_id, _code, cookies):
         self.release.wait(timeout=2)
+        return True, "登录成功", cookies
+
+
+class FlakyLoginApi(FakeLoginApi):
+    """前 failures 次轮询抛异常，之后返回登录成功。"""
+
+    def __init__(self, failures: int) -> None:
+        self.remaining_failures = failures
+        self.calls = 0
+
+    def check_qrcode_status(self, _qr_id, _code, cookies):
+        self.calls += 1
+        if self.remaining_failures > 0:
+            self.remaining_failures -= 1
+            raise RuntimeError("transient poll error")
         return True, "登录成功", cookies
 
 
@@ -417,6 +433,136 @@ xiaohongshu:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_post_endpoints_enforce_local_json_write_guard(self) -> None:
+        base_settings = replace(
+            self.settings,
+            settings_path=self.root / "settings.json",
+        )
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            build_handler(self.store, settings_loader=lambda: base_settings),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        body = json.dumps(
+            {"keywords": [{"query": "宠物进客舱"}]},
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        def post(path: str, headers: dict[str, str], data: bytes = body):
+            request = Request(
+                f"{base_url}{path}",
+                data=data,
+                headers=headers,
+                method="POST",
+            )
+            return urlopen(request, timeout=2)
+
+        try:
+            # 无 Origin 的 JSON 请求放行（official-monitor 代理调用路径）
+            with post(
+                "/api/v1/settings",
+                {"Content-Type": "application/json"},
+            ) as response:
+                self.assertEqual(response.status, 200)
+            # 本机来源 Origin 放行
+            with post(
+                "/api/v1/settings",
+                {
+                    "Content-Type": "application/json",
+                    "Origin": f"http://127.0.0.1:{server.server_port}",
+                },
+            ) as response:
+                self.assertEqual(response.status, 200)
+            # 跨域 Origin 拒绝
+            with self.assertRaises(HTTPError) as cross_origin:
+                post(
+                    "/api/v1/settings",
+                    {
+                        "Content-Type": "application/json",
+                        "Origin": "https://evil.example",
+                    },
+                )
+            self.assertEqual(cross_origin.exception.code, 400)
+            cross_origin.exception.close()
+            # 非 JSON Content-Type 拒绝
+            with self.assertRaises(HTTPError) as bad_type:
+                post("/api/v1/settings", {"Content-Type": "text/plain"})
+            self.assertEqual(bad_type.exception.code, 400)
+            bad_type.exception.close()
+            # login/start 同样受防护
+            with self.assertRaises(HTTPError) as login_denied:
+                post(
+                    "/api/v1/login/start",
+                    {
+                        "Content-Type": "application/json",
+                        "Origin": "https://evil.example",
+                    },
+                    data=b"{}",
+                )
+            self.assertEqual(login_denied.exception.code, 400)
+            login_denied.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def _wait_for_login_status(
+        self,
+        manager: LoginSessionManager,
+        expected: str,
+        timeout: float = 5,
+    ) -> str:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = manager.status()["status"]
+            if status == expected:
+                return status
+            time.sleep(0.05)
+        return manager.status()["status"]
+
+    def test_web_login_poll_tolerates_transient_failures(self) -> None:
+        cookie_path = self.root / "xhs_cookie.txt"
+        login_api = FlakyLoginApi(failures=2)
+        manager = LoginSessionManager(
+            cookie_path,
+            api_loader=lambda: login_api,
+            poll_seconds=0.1,
+        )
+
+        manager.start()
+
+        # 连续 2 次瞬时异常后成功，登录仍应完成
+        self.assertEqual(
+            self._wait_for_login_status(manager, "success"),
+            "success",
+        )
+        self.assertEqual(login_api.calls, 3)
+        self.assertEqual(
+            cookie_path.read_text(encoding="utf-8"),
+            "private-session-value",
+        )
+
+    def test_web_login_poll_fails_after_three_consecutive_errors(self) -> None:
+        cookie_path = self.root / "xhs_cookie.txt"
+        login_api = FlakyLoginApi(failures=100)
+        manager = LoginSessionManager(
+            cookie_path,
+            api_loader=lambda: login_api,
+            poll_seconds=0.1,
+        )
+
+        manager.start()
+
+        # 连续 3 次失败才判定登录失败
+        self.assertEqual(
+            self._wait_for_login_status(manager, "failed"),
+            "failed",
+        )
+        self.assertEqual(login_api.calls, 3)
+        self.assertFalse(cookie_path.exists())
 
 
 if __name__ == "__main__":

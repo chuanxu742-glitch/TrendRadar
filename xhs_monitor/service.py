@@ -143,7 +143,27 @@ def collect_once(
     try:
         fetcher = fetcher_factory(settings.fetcher_config)
         results, _names, failed_ids = fetcher.fetch_all()
-    except Exception:
+    except XiaohongshuRiskControlError as exc:
+        # 风控信号：单独输出可辨识提示，行为保持不变（全部标记失败）
+        print(
+            "[xhs-monitor] collection blocked by risk control: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        results = {}
+        failed_ids = configured_ids
+    except XiaohongshuSessionError as exc:
+        # 会话失效：需要重新扫码登录
+        print(
+            "[xhs-monitor] collection failed, session invalid (re-login required): "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        results = {}
+        failed_ids = configured_ids
+    except Exception as exc:
+        # 其他异常：输出 repr 以便区分网络、解析等问题
+        print(f"[xhs-monitor] collection failed: {exc!r}", flush=True)
         results = {}
         failed_ids = configured_ids
     result = store.record_run(
@@ -190,13 +210,29 @@ def collect_once(
                     "detail_status": "success",
                 }
             detailed.append({**candidate, **detail})
-        except (XiaohongshuRiskControlError, XiaohongshuSessionError):
+        except (XiaohongshuRiskControlError, XiaohongshuSessionError) as exc:
+            # 风控或会话失效：中止本轮详情抓取
+            reason = (
+                "risk control"
+                if isinstance(exc, XiaohongshuRiskControlError)
+                else "session invalid"
+            )
+            print(
+                f"[xhs-monitor] detail fetch aborted ({reason}): "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
             store.update_note_intelligence(
                 candidate["note_key"],
                 detail={"detail_status": "failed"},
             )
             break
-        except Exception:
+        except Exception as exc:
+            print(
+                "[xhs-monitor] detail fetch failed for "
+                f"{candidate['note_key']}: {exc!r}",
+                flush=True,
+            )
             store.update_note_intelligence(
                 candidate["note_key"],
                 detail={"detail_status": "failed"},
@@ -246,6 +282,21 @@ def build_handler(
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(content)
+
+        def require_local_json_write(self) -> None:
+            # 与 monitor/http_api.py 的 _require_local_json_write 语义一致：
+            # 写接口必须是 JSON 请求；带 Origin 时仅允许本机来源或与 Host 一致；
+            # 无 Origin 的请求放行（official-monitor 容器代理调用不带 Origin）。
+            content_type = str(self.headers.get("Content-Type") or "").lower()
+            if not content_type.startswith("application/json"):
+                raise ValueError("Content-Type must be application/json")
+            origin = str(self.headers.get("Origin") or "").strip()
+            if not origin:
+                return
+            origin_host = (urlsplit(origin).hostname or "").lower()
+            request_host = str(self.headers.get("Host") or "").split(":", 1)[0].lower()
+            if origin_host not in {"localhost", "127.0.0.1", "::1", request_host}:
+                raise ValueError("cross-origin source changes are not allowed")
 
         def read_json_body(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -311,6 +362,7 @@ def build_handler(
             parsed = urlsplit(self.path)
             try:
                 if parsed.path == "/api/v1/settings":
+                    self.require_local_json_write()
                     payload = self.read_json_body()
                     keywords = payload.get("keywords")
                     if not isinstance(keywords, list):
@@ -324,6 +376,7 @@ def build_handler(
                     self.send_json(self.settings_payload())
                     return
                 if parsed.path == "/api/v1/login/start":
+                    self.require_local_json_write()
                     self.read_json_body()
                     if login_manager is None:
                         self.send_json(
@@ -408,11 +461,16 @@ def main() -> None:
         args=(settings, store),
         daemon=True,
     ).start()
+    # 默认仅监听本机；容器部署由 compose 显式设置 XHS_BIND_HOST=0.0.0.0
+    bind_host = str(os.getenv("XHS_BIND_HOST", "")).strip() or "127.0.0.1"
     server = ThreadingHTTPServer(
-        ("0.0.0.0", settings.port),
+        (bind_host, settings.port),
         build_handler(store, login_manager=login_manager),
     )
-    print(f"[xhs-monitor] summary API listening on {settings.port}", flush=True)
+    print(
+        f"[xhs-monitor] summary API listening on {bind_host}:{settings.port}",
+        flush=True,
+    )
     server.serve_forever()
 
 

@@ -15,6 +15,9 @@ from xhs_monitor.fetcher import load_spider_xhs_login_api, spider_xhs_runtime
 
 PENDING_STATUSES = {"creating", "waiting_scan", "waiting_confirm"}
 
+# 轮询登录状态时容忍的连续失败次数：超过才判定登录失败，避免一次网络抖动作废扫码
+MAX_POLL_FAILURES = 3
+
 
 def qr_svg_data_url(value: str) -> str:
     qr = qrcode.QRCode(version=None, box_size=1, border=2)
@@ -111,7 +114,8 @@ class LoginSessionManager:
                 args=(api, qr_data, deadline),
                 daemon=True,
             ).start()
-        except Exception:
+        except Exception as exc:
+            print(f"[xhs-monitor] login start failed: {exc!r}", flush=True)
             self._replace_state(
                 status="failed",
                 status_label="登录服务暂时不可用，请重试",
@@ -120,6 +124,7 @@ class LoginSessionManager:
 
     def _poll(self, api: Any, qr_data: dict[str, Any], deadline: float) -> None:
         cookies = qr_data["cookies"]
+        failure_count = 0  # 连续失败计数：成功一次即重置
         while time.monotonic() < deadline:
             try:
                 with spider_xhs_runtime():
@@ -128,6 +133,7 @@ class LoginSessionManager:
                         qr_data["code"],
                         cookies,
                     )
+                failure_count = 0
                 if success:
                     self._finish(api, cookies)
                     return
@@ -144,12 +150,19 @@ class LoginSessionManager:
                         qr_image=self.status().get("qr_image", ""),
                         expires_at=self.status().get("expires_at", ""),
                     )
-            except Exception:
-                self._replace_state(
-                    status="failed",
-                    status_label="登录状态检查失败，请重试",
+            except Exception as exc:
+                failure_count += 1
+                print(
+                    "[xhs-monitor] login poll error "
+                    f"({failure_count}/{MAX_POLL_FAILURES}): {exc!r}",
+                    flush=True,
                 )
-                return
+                if failure_count >= MAX_POLL_FAILURES:
+                    self._replace_state(
+                        status="failed",
+                        status_label="登录状态检查失败，请重试",
+                    )
+                    return
             time.sleep(self.poll_seconds)
         self._replace_state(
             status="expired",
