@@ -23,6 +23,8 @@ services:
       - XHS_MONITOR_DATABASE=/app/state/xhs-monitor.db
       - XHS_MONITOR_SETTINGS=/app/state/settings.json
       - XHS_MONITOR_PORT=8091
+      # 容器内必须全接口监听，official-monitor 才能跨容器访问摘要 API
+      - XHS_BIND_HOST=0.0.0.0
       - XHS_AI_SUMMARY_ENABLED=${XHS_AI_SUMMARY_ENABLED:-true}
       - XHS_AI_TIMEOUT=${XHS_AI_TIMEOUT:-60}
       - AI_API_KEY=${AI_API_KEY:-}
@@ -102,6 +104,9 @@ services:
       - MONITOR_XHS_SUMMARY_URL=http://xhs-monitor:8091/api/v1/summary
       - MONITOR_XHS_SUMMARY_TIMEOUT=${MONITOR_XHS_SUMMARY_TIMEOUT:-2}
       - MONITOR_PORT=8090
+      # 代码默认只监听 127.0.0.1；容器内必须全接口监听端口映射才能生效
+      - MONITOR_BIND_HOST=0.0.0.0
+      - MONITOR_SNAPSHOT_RETENTION_DAYS=${MONITOR_SNAPSHOT_RETENTION_DAYS:-30}
       - MONITOR_POLICY_DIGEST_ENABLED=${MONITOR_POLICY_DIGEST_ENABLED:-true}
       - MONITOR_AI_SUMMARY_ENABLED=${MONITOR_AI_SUMMARY_ENABLED:-true}
       - MONITOR_AI_SUMMARY_BATCH_SIZE=${MONITOR_AI_SUMMARY_BATCH_SIZE:-20}

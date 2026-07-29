@@ -375,6 +375,124 @@ class MonitorHttpContractTests(unittest.TestCase):
         self.assertEqual(captured.exception.code, 400)
         self.assertEqual(self.store.count_sources(), 0)
 
+    def test_state_directory_files_are_not_served_as_static_content(self) -> None:
+        gptmail_dir = self.root / "gptmail"
+        gptmail_dir.mkdir()
+        (gptmail_dir / "public-key.json").write_text('{"key": "secret"}', encoding="utf-8")
+        (self.root / "state.json").write_text('{"secret": true}', encoding="utf-8")
+        (self.root / "full-scan-supervisor.log").write_text("secret log", encoding="utf-8")
+
+        for path in (
+            "/monitor.db",
+            "/monitor.db-wal",
+            "/gptmail/public-key.json",
+            "/state.json",
+            "/full-scan-supervisor.log",
+        ):
+            with self.subTest(path=path):
+                status, body = self.fetch(path)
+                self.assertEqual(status, 404)
+                self.assertNotIn(b"secret", body)
+
+    def test_head_requests_do_not_expose_state_files(self) -> None:
+        request = urllib.request.Request(f"{self.base_url}/monitor.db", method="HEAD")
+
+        with self.assertRaises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(request, timeout=5)
+
+        self.assertEqual(captured.exception.code, 404)
+
+    def test_inventory_json_stays_readable_for_feed_links(self) -> None:
+        (self.root / "inventory.json").write_text('{"sources": []}', encoding="utf-8")
+
+        status, body = self.fetch("/inventory.json")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"sources": []})
+
+    def test_review_and_knowledge_actions_reject_non_json_content_type(self) -> None:
+        for path in (
+            "/api/v1/review-tasks/review-any/actions",
+            "/api/v1/knowledge-updates/proposal-any/actions",
+        ):
+            with self.subTest(path=path):
+                request = urllib.request.Request(
+                    f"{self.base_url}{path}",
+                    data=json.dumps({"action": "retire"}).encode("utf-8"),
+                    headers={"Content-Type": "text/plain"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as captured:
+                    urllib.request.urlopen(request, timeout=5)
+                self.assertEqual(captured.exception.code, 400)
+                self.assertIn(
+                    "Content-Type",
+                    json.loads(captured.exception.read())["error"],
+                )
+
+    def test_cross_origin_review_and_knowledge_actions_are_rejected(self) -> None:
+        for path in (
+            "/api/v1/review-tasks/review-any/actions",
+            "/api/v1/knowledge-updates/proposal-any/actions",
+        ):
+            with self.subTest(path=path):
+                request = urllib.request.Request(
+                    f"{self.base_url}{path}",
+                    data=json.dumps({"action": "retire"}).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": "https://attacker.example",
+                    },
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as captured:
+                    urllib.request.urlopen(request, timeout=5)
+                self.assertEqual(captured.exception.code, 400)
+                self.assertIn(
+                    "cross-origin",
+                    json.loads(captured.exception.read())["error"],
+                )
+
+    def test_post_requires_bearer_token_when_configured(self) -> None:
+        preview_body = json.dumps(
+            {"input": "CDC https://www.cdc.gov/importation/dogs/", "use_ai": False}
+        ).encode("utf-8")
+        with mock.patch.dict("os.environ", {"MONITOR_API_TOKEN": "secret-token"}):
+            missing_status, missing = self.post_json(
+                "/api/v1/sources/preview", {"input": "https://example.gov/pets"}
+            )
+            self.assertEqual(missing_status, 401)
+            self.assertEqual(missing["error"], "unauthorized")
+
+            wrong = urllib.request.Request(
+                f"{self.base_url}/api/v1/sources/preview",
+                data=preview_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer wrong-token",
+                },
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as captured:
+                urllib.request.urlopen(wrong, timeout=5)
+            self.assertEqual(captured.exception.code, 401)
+
+            valid = urllib.request.Request(
+                f"{self.base_url}/api/v1/sources/preview",
+                data=preview_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer secret-token",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(valid, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+
+            # GET 只读接口不受 token 约束
+            status, _ = self.fetch("/health/live")
+            self.assertEqual(status, 200)
+
     def test_site_url_inventory_supports_filters_pagination_and_summary(self) -> None:
         records = {
             "https://air.test/pets": {

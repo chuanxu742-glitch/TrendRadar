@@ -7,6 +7,7 @@ import html
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -160,6 +161,8 @@ XHS_SUMMARY_TIMEOUT = max(
     0.1,
 )
 PORT = int(os.getenv("MONITOR_PORT", "8090"))
+# HTTP 服务绑定地址：默认只监听本机，容器内需通过环境变量设为 0.0.0.0
+BIND_HOST = os.getenv("MONITOR_BIND_HOST", "127.0.0.1")
 MONITOR_INTERVAL = max(int(os.getenv("MONITOR_INTERVAL", "900")), 30)
 BATCH_SIZE = int(os.getenv("MONITOR_BATCH_SIZE", "75"))
 SCAN_CONCURRENCY = min(max(int(os.getenv("MONITOR_SCAN_CONCURRENCY", "8")), 1), 16)
@@ -169,6 +172,8 @@ REQUEST_TIMEOUT = int(os.getenv("MONITOR_REQUEST_TIMEOUT", "15"))
 EVENT_LIMIT = int(os.getenv("MONITOR_EVENT_LIMIT", "1000"))
 MAX_RAW_SNAPSHOT_BYTES = int(os.getenv("MONITOR_MAX_RAW_SNAPSHOT_BYTES", str(20 * 1024 * 1024)))
 MAX_TEXT_SNAPSHOT_CHARS = int(os.getenv("MONITOR_MAX_TEXT_SNAPSHOT_CHARS", str(2 * 1024 * 1024)))
+# 快照保留天数：超龄且未被 state/current/证据链引用的快照目录会被清理
+SNAPSHOT_RETENTION_DAYS = max(int(os.getenv("MONITOR_SNAPSHOT_RETENTION_DAYS", "30")), 1)
 VALIDATION_RULE_VERSION = 2
 POLICY_EVIDENCE_RULE_VERSION = 3
 POLICY_DIGEST_ENABLED = os.getenv("MONITOR_POLICY_DIGEST_ENABLED", "true").lower() in {
@@ -3773,6 +3778,118 @@ def save_snapshot(
         },
     )
     return relative.as_posix()
+
+
+def _snapshot_reference_paths() -> set[str]:
+    """收集仍被 state 记录、current 指针或数据库证据链引用的快照目录（相对 STATE_DIR）。"""
+
+    referenced: set[str] = set()
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip().strip("/")
+        if not text:
+            return
+        parts = Path(text).parts
+        # 引用可能是快照目录本身，也可能是目录下的 content.md / raw 文件
+        if len(parts) >= 3 and parts[0] == "snapshots":
+            referenced.add(Path(*parts[:3]).as_posix())
+
+    state = load_state_with_journal(STATE_DIR / "state.json")
+    for record in state.values():
+        if isinstance(record, dict):
+            add(record.get("snapshot_path"))
+            add(record.get("previous_snapshot_path"))
+    current_dir = STATE_DIR / "current"
+    if current_dir.is_dir():
+        for pointer_path in current_dir.glob("*.json"):
+            pointer = load_json(pointer_path, {})
+            if isinstance(pointer, dict):
+                add(pointer.get("snapshot_path"))
+    database_path = Path(os.getenv("MONITOR_DATABASE", str(STATE_DIR / "monitor.db")))
+    if _MONITOR_STORE_PATH == database_path or database_path.exists():
+        # 数据库读取失败时让异常向上传播：宁可跳过本轮清理，也不能误删证据快照
+        with monitor_store().transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT raw_path, normalized_path FROM content_snapshots
+                WHERE id IN (
+                    SELECT old_snapshot_id FROM change_candidates WHERE old_snapshot_id IS NOT NULL
+                    UNION SELECT new_snapshot_id FROM change_candidates WHERE new_snapshot_id IS NOT NULL
+                    UNION SELECT old_snapshot_id FROM evidence_bundles WHERE old_snapshot_id IS NOT NULL
+                    UNION SELECT new_snapshot_id FROM evidence_bundles WHERE new_snapshot_id IS NOT NULL
+                    UNION SELECT last_good_snapshot_id FROM source_endpoints
+                        WHERE last_good_snapshot_id IS NOT NULL
+                )
+                """
+            ).fetchall()
+        for row in rows:
+            add(row["raw_path"])
+            add(row["normalized_path"])
+    return referenced
+
+
+def _snapshot_dir_captured_at(path: Path) -> datetime | None:
+    """从快照目录名解析抓取时间；解析失败时退回目录修改时间。"""
+
+    stamp = path.name.rsplit("-", 1)[0]
+    for fmt in ("%Y%m%dT%H%M%S%z", "%Y%m%dT%H%M%S"):
+        try:
+            parsed = datetime.strptime(stamp, fmt)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return None
+
+
+def enforce_snapshot_retention(retention_days: int | None = None) -> dict[str, int]:
+    """删除超龄且未被引用的快照目录；每个来源最新两份快照无条件保留。"""
+
+    days = SNAPSHOT_RETENTION_DAYS if retention_days is None else max(int(retention_days), 1)
+    summary = {"removed_dirs": 0, "removed_files": 0, "freed_bytes": 0, "kept_referenced": 0}
+    root = STATE_DIR / "snapshots"
+    if not root.is_dir():
+        return summary
+    referenced = _snapshot_reference_paths()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    for source_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        snapshot_dirs = sorted(path for path in source_dir.iterdir() if path.is_dir())
+        # 目录名以 UTC 时间戳开头，字典序即时间序；最新两份保证最近事件仍可回放对比
+        for snapshot_dir in snapshot_dirs[:-2]:
+            captured = _snapshot_dir_captured_at(snapshot_dir)
+            if captured is None or captured >= cutoff:
+                continue
+            relative = snapshot_dir.relative_to(STATE_DIR).as_posix()
+            if relative in referenced:
+                summary["kept_referenced"] += 1
+                continue
+            files = [item for item in snapshot_dir.rglob("*") if item.is_file()]
+            try:
+                freed = sum(item.stat().st_size for item in files)
+                shutil.rmtree(snapshot_dir)
+            except OSError as exc:
+                print(
+                    f"[official-monitor] snapshot retention skipped {relative}: {exc}",
+                    flush=True,
+                )
+                continue
+            summary["removed_dirs"] += 1
+            summary["removed_files"] += len(files)
+            summary["freed_bytes"] += freed
+        try:
+            if not any(source_dir.iterdir()):
+                source_dir.rmdir()
+        except OSError:
+            pass
+    print(
+        "[official-monitor] snapshot retention complete; "
+        f"retention_days={days} removed_files={summary['removed_files']} "
+        f"freed_bytes={summary['freed_bytes']} kept_referenced={summary['kept_referenced']}",
+        flush=True,
+    )
+    return summary
 
 
 def discovered_source(url: str, source: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -8435,6 +8552,17 @@ def reconcile_knowledge_operations(store: MonitorStore | None = None) -> dict[st
 
 
 
+def snapshot_retention_worker() -> None:
+    """每天清理一次超龄且未被引用的快照，控制 snapshots/ 目录体积。"""
+
+    while True:
+        try:
+            enforce_snapshot_retention()
+        except Exception as exc:
+            print(f"[official-monitor] snapshot retention failed: {exc}", flush=True)
+        time.sleep(86400)
+
+
 def site_discovery_worker() -> None:
     while True:
         started = time.monotonic()
@@ -8481,6 +8609,7 @@ def main() -> None:
     threading.Thread(target=policy_summary_worker, daemon=True).start()
     threading.Thread(target=evidence_agent_worker, daemon=True).start()
     threading.Thread(target=site_discovery_worker, daemon=True).start()
+    threading.Thread(target=snapshot_retention_worker, daemon=True).start()
     while True:
         cycle_started = time.monotonic()
         try:

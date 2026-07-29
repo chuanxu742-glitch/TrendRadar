@@ -15,6 +15,17 @@ $restartCount = 0
 
 function Write-SupervisorLog([string]$Message) {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    # 日志超过 10MB 时轮转：当前日志改名为 .1 保留一份，旧 .1 被覆盖
+    if (Test-Path -LiteralPath $logFile) {
+        try {
+            if ((Get-Item -LiteralPath $logFile).Length -gt 10MB) {
+                Move-Item -LiteralPath $logFile -Destination "$logFile.1" -Force
+            }
+        }
+        catch {
+            # 轮转失败不阻塞监控主流程，继续追加写入
+        }
+    }
     Add-Content -LiteralPath $logFile -Value "[$timestamp] $Message" -Encoding UTF8
 }
 

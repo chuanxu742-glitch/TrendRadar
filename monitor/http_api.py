@@ -6,7 +6,9 @@
 审核/知识库操作接口。业务逻辑仍由 official_monitor 模块提供，这里只负责路由与协议细节。
 """
 
+import hmac
 import json
+import os
 import re
 import importlib
 import sys
@@ -43,9 +45,6 @@ def bind_monitor_module(module: ModuleType) -> None:
 
 
 class MonitorRequestHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, directory=str(om.STATE_DIR), **kwargs)
-
     def send_bytes(self, content: bytes, content_type: str, status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -364,7 +363,25 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
             except OSError as exc:
                 self.send_error(404, f"feed unavailable: {exc}")
             return
-        super().do_GET()
+        if path == "/inventory.json":
+            # 知识库来源清单会出现在 RSS 事件链接里，保留只读访问
+            try:
+                self.send_bytes(
+                    (om.STATE_DIR / "inventory.json").read_bytes(),
+                    "application/json; charset=utf-8",
+                )
+            except OSError as exc:
+                self.send_error(404, f"inventory unavailable: {exc}")
+            return
+        # STATE_DIR 下包含 monitor.db、gptmail 密钥和各类状态文件，
+        # 绝不能回落到母类的静态目录服务，未知路径一律 404
+        self.send_json({"error": "not found"}, 404)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        # 本服务不提供静态文件浏览：HEAD 一律 404，避免母类回落到文件系统
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _read_json_body(self) -> dict[str, Any]:
         length = min(max(int(self.headers.get("Content-Length", "0") or 0), 0), 64 * 1024)
@@ -387,7 +404,28 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
         if origin_host not in {"localhost", "127.0.0.1", "::1", request_host}:
             raise ValueError("cross-origin source changes are not allowed")
 
+    def _authorize_api_token(self) -> bool:
+        """可选 Bearer token 鉴权：未配置 MONITOR_API_TOKEN 时保持原有开放行为。"""
+        token = os.getenv("MONITOR_API_TOKEN", "")
+        if not token:
+            return True
+        header = str(self.headers.get("Authorization") or "").strip()
+        provided = header[len("Bearer "):].strip() if header.startswith("Bearer ") else ""
+        if provided and hmac.compare_digest(provided, token):
+            return True
+        # 拒绝前先读掉请求体，避免客户端在写入途中收到连接重置
+        length = min(max(int(self.headers.get("Content-Length", "0") or 0), 0), 64 * 1024)
+        if length:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
+        self.send_json({"error": "unauthorized"}, 401)
+        return False
+
     def do_POST(self) -> None:  # noqa: N802
+        if not self._authorize_api_token():
+            return
         path = urlsplit(self.path).path
         try:
             payload = self._read_json_body()
@@ -441,6 +479,7 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
                 return
             review_match = re.fullmatch(r"/api/v1/review-tasks/([^/]+)/actions", path)
             if review_match:
+                self._require_local_json_write()
                 task_id = unquote(review_match.group(1))
                 action = str(payload.get("action") or "").lower()
                 task = om.monitor_store().get_review_task(task_id)
@@ -549,6 +588,7 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
                 return
             proposal_match = re.fullmatch(r"/api/v1/knowledge-updates/([^/]+)/actions", path)
             if proposal_match:
+                self._require_local_json_write()
                 proposal_id = unquote(proposal_match.group(1))
                 action = str(payload.get("action") or "").lower()
                 owner = str(payload.get("owner") or actor)
@@ -592,4 +632,5 @@ class MonitorRequestHandler(SimpleHTTPRequestHandler):
 
 
 def serve() -> None:
-    ThreadingHTTPServer(("0.0.0.0", om.PORT), MonitorRequestHandler).serve_forever()
+    # 绑定地址由 MONITOR_BIND_HOST 控制，默认只监听本机；容器部署需显式设为 0.0.0.0
+    ThreadingHTTPServer((om.BIND_HOST, om.PORT), MonitorRequestHandler).serve_forever()
