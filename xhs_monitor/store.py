@@ -91,6 +91,32 @@ class XiaohongshuStore:
                     ON notes(source_id, last_seen_at DESC);
                 """
             )
+            note_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(notes)").fetchall()
+            }
+            migrations = {
+                "content": "TEXT NOT NULL DEFAULT ''",
+                "author": "TEXT NOT NULL DEFAULT ''",
+                "ip_location": "TEXT NOT NULL DEFAULT ''",
+                "liked_count": "TEXT NOT NULL DEFAULT ''",
+                "collected_count": "TEXT NOT NULL DEFAULT ''",
+                "comment_count": "TEXT NOT NULL DEFAULT ''",
+                "detail_status": "TEXT NOT NULL DEFAULT 'pending'",
+                "detail_checked_at": "TEXT NOT NULL DEFAULT ''",
+                "relevant": "INTEGER NOT NULL DEFAULT 0",
+                "topic": "TEXT NOT NULL DEFAULT ''",
+                "summary": "TEXT NOT NULL DEFAULT ''",
+                "business_value": "TEXT NOT NULL DEFAULT ''",
+                "relevance_reason": "TEXT NOT NULL DEFAULT ''",
+                "summary_origin": "TEXT NOT NULL DEFAULT ''",
+                "analyzed_at": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, definition in migrations.items():
+                if name not in note_columns:
+                    connection.execute(
+                        f"ALTER TABLE notes ADD COLUMN {name} {definition}"
+                    )
             connection.commit()
 
     def sync_keywords(self, keywords: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
@@ -235,6 +261,143 @@ class XiaohongshuStore:
             "item_count": item_count,
         }
 
+    def detail_candidates(
+        self,
+        *,
+        limit_per_source: int = 5,
+    ) -> list[dict[str, str]]:
+        per_source = min(max(int(limit_per_source), 1), 20)
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT n.note_key, n.source_id, k.query, n.title, n.url,
+                       n.detail_status, n.last_seen_at, n.rank
+                FROM notes n
+                JOIN keywords k ON k.source_id=n.source_id
+                WHERE k.enabled=1
+                  AND n.url <> ''
+                  AND n.detail_status IN ('pending', 'failed')
+                ORDER BY
+                    CASE n.detail_status WHEN 'pending' THEN 0 ELSE 1 END,
+                    n.last_seen_at DESC,
+                    n.rank ASC,
+                    n.note_key
+                LIMIT 500
+                """
+            ).fetchall()
+        selected: list[dict[str, str]] = []
+        source_counts: dict[str, int] = {}
+        for row in rows:
+            source_id = str(row["source_id"])
+            if source_counts.get(source_id, 0) >= per_source:
+                continue
+            source_counts[source_id] = source_counts.get(source_id, 0) + 1
+            selected.append(
+                {
+                    "note_key": str(row["note_key"]),
+                    "source_id": source_id,
+                    "query": str(row["query"]),
+                    "title": str(row["title"]),
+                    "url": safe_note_url(row["url"]),
+                }
+            )
+        return selected
+
+    def update_note_intelligence(
+        self,
+        note_key: str,
+        *,
+        detail: dict[str, Any],
+        analysis: dict[str, Any] | None = None,
+    ) -> None:
+        checked_at = now_iso()
+        status = str(detail.get("detail_status") or "failed")
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """
+                UPDATE notes
+                SET title=COALESCE(NULLIF(?, ''), title),
+                    content=?, author=?, ip_location=?,
+                    liked_count=?, collected_count=?, comment_count=?,
+                    detail_status=?, detail_checked_at=?
+                WHERE note_key=?
+                """,
+                (
+                    str(detail.get("title") or "")[:300],
+                    str(detail.get("content") or "")[:8000],
+                    str(detail.get("author") or "")[:100],
+                    str(detail.get("ip_location") or "")[:100],
+                    str(detail.get("liked_count") or "")[:30],
+                    str(detail.get("collected_count") or "")[:30],
+                    str(detail.get("comment_count") or "")[:30],
+                    status if status in {"success", "failed"} else "failed",
+                    checked_at,
+                    str(note_key),
+                ),
+            )
+            if analysis is not None:
+                relevant = analysis.get("relevant") is True
+                connection.execute(
+                    """
+                    UPDATE notes
+                    SET relevant=?, topic=?, summary=?, business_value=?,
+                        relevance_reason=?, summary_origin=?, analyzed_at=?
+                    WHERE note_key=?
+                    """,
+                    (
+                        1 if relevant else 0,
+                        str(analysis.get("topic") or "")[:80] if relevant else "",
+                        str(analysis.get("summary") or "")[:500] if relevant else "",
+                        (
+                            str(analysis.get("business_value") or "")[:300]
+                            if relevant
+                            else ""
+                        ),
+                        str(analysis.get("relevance_reason") or "")[:300],
+                        str(analysis.get("summary_origin") or "")[:30],
+                        checked_at,
+                        str(note_key),
+                    ),
+                )
+            connection.commit()
+
+    def analysis_candidates(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        requested_limit = min(max(int(limit), 1), 200)
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT n.note_key, n.source_id, k.query, n.title, n.url,
+                       n.content, n.author, n.ip_location, n.liked_count,
+                       n.collected_count, n.comment_count, n.detail_status
+                FROM notes n
+                JOIN keywords k ON k.source_id=n.source_id
+                WHERE k.enabled=1
+                  AND n.detail_status='success'
+                  AND n.content <> ''
+                  AND n.summary_origin='deterministic'
+                ORDER BY n.analyzed_at ASC, n.last_seen_at DESC, n.rank ASC
+                LIMIT ?
+                """,
+                (requested_limit,),
+            ).fetchall()
+        return [
+            {
+                "note_key": str(row["note_key"]),
+                "source_id": str(row["source_id"]),
+                "query": str(row["query"]),
+                "title": str(row["title"]),
+                "url": safe_note_url(row["url"]),
+                "content": str(row["content"]),
+                "author": str(row["author"]),
+                "ip_location": str(row["ip_location"]),
+                "liked_count": str(row["liked_count"]),
+                "collected_count": str(row["collected_count"]),
+                "comment_count": str(row["comment_count"]),
+                "detail_status": str(row["detail_status"]),
+            }
+            for row in rows
+        ]
+
     def summary(self, *, limit: int = 100) -> dict[str, Any]:
         requested_limit = min(max(int(limit), 1), 500)
         today = datetime.now().astimezone().date().isoformat()
@@ -259,15 +422,34 @@ class XiaohongshuStore:
             note_rows = connection.execute(
                 """
                 SELECT n.source_id, k.name AS source_name, n.title, n.rank,
-                       n.url, n.first_seen_at, n.last_seen_at
+                       n.url, n.first_seen_at, n.last_seen_at,
+                       n.author, n.ip_location, n.liked_count,
+                       n.collected_count, n.comment_count, n.topic,
+                       n.summary, n.business_value, n.relevance_reason,
+                       n.summary_origin, n.content
                 FROM notes n
                 JOIN keywords k ON k.source_id=n.source_id
                 WHERE k.enabled=1
+                  AND n.detail_status='success'
+                  AND n.relevant=1
                 ORDER BY n.last_seen_at DESC, n.rank ASC, n.note_key
                 LIMIT ?
                 """,
                 (requested_limit,),
             ).fetchall()
+            note_counts = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS candidate_count,
+                    SUM(CASE WHEN n.detail_status IN ('pending', 'failed')
+                        THEN 1 ELSE 0 END) AS pending_detail_count,
+                    SUM(CASE WHEN n.analyzed_at <> '' AND n.relevant=0
+                        THEN 1 ELSE 0 END) AS filtered_count
+                FROM notes n
+                JOIN keywords k ON k.source_id=n.source_id
+                WHERE k.enabled=1
+                """
+            ).fetchone()
 
         source_count = len(source_rows)
         updated_at = str(run["finished_at"] or "") if run else ""
@@ -297,6 +479,17 @@ class XiaohongshuStore:
                 "url": safe_note_url(row["url"]),
                 "first_seen_at": str(row["first_seen_at"]),
                 "last_seen_at": str(row["last_seen_at"]),
+                "author": str(row["author"]),
+                "ip_location": str(row["ip_location"]),
+                "liked_count": str(row["liked_count"]),
+                "collected_count": str(row["collected_count"]),
+                "comment_count": str(row["comment_count"]),
+                "topic": str(row["topic"]),
+                "summary": str(row["summary"]),
+                "business_value": str(row["business_value"]),
+                "relevance_reason": str(row["relevance_reason"]),
+                "summary_origin": str(row["summary_origin"]),
+                "content_excerpt": str(row["content"])[:600],
             }
             for row in note_rows
         ]
@@ -310,5 +503,8 @@ class XiaohongshuStore:
             "updated_at": updated_at,
             "today_count": today_count,
             "recent_count": len(items),
+            "candidate_count": int(note_counts["candidate_count"] or 0),
+            "pending_detail_count": int(note_counts["pending_detail_count"] or 0),
+            "filtered_count": int(note_counts["filtered_count"] or 0),
             "items": items,
         }

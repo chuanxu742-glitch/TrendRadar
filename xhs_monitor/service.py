@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -13,7 +14,12 @@ from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 
-from xhs_monitor.fetcher import XiaohongshuFetcher
+from xhs_monitor.fetcher import (
+    XiaohongshuFetcher,
+    XiaohongshuRiskControlError,
+    XiaohongshuSessionError,
+)
+from xhs_monitor.intelligence import analyze_notes
 from xhs_monitor.settings import (
     load_managed_keywords,
     save_managed_keywords,
@@ -105,6 +111,9 @@ def load_settings(path: Path | None = None) -> Settings:
             "NOTE_TYPE": config.get("note_type", "all"),
             "NOTE_TIME": config.get("note_time", "day"),
             "PROXY_URL": str(os.getenv("XHS_PROXY_URL", "")).strip(),
+            "DETAIL_LIMIT_PER_KEYWORD": config.get("detail_limit_per_keyword", 5),
+            "DETAIL_INTERVAL_MIN_SECONDS": intervals.get("detail_min", 3),
+            "DETAIL_INTERVAL_MAX_SECONDS": intervals.get("detail_max", 6),
             "KEYWORDS": keywords,
         },
         settings_path=settings_path,
@@ -117,6 +126,8 @@ def collect_once(
     store: XiaohongshuStore,
     *,
     fetcher_factory: Callable[[dict[str, Any]], Any] = XiaohongshuFetcher.from_config,
+    analyzer: Callable[[list[dict[str, Any]]], dict[str, dict[str, Any]]] = analyze_notes,
+    sleep_func: Callable[[float], None] = time.sleep,
 ) -> dict[str, int | str]:
     started_at = now_iso()
     keywords = store.sync_keywords(settings.keywords)
@@ -128,18 +139,93 @@ def collect_once(
             results={},
             failed_ids=configured_ids,
         )
+    fetcher = None
     try:
         fetcher = fetcher_factory(settings.fetcher_config)
         results, _names, failed_ids = fetcher.fetch_all()
     except Exception:
         results = {}
         failed_ids = configured_ids
-    return store.record_run(
+    result = store.record_run(
         started_at=started_at,
         keywords=keywords,
         results=results,
         failed_ids=failed_ids,
     )
+    if fetcher is None:
+        return result
+
+    try:
+        detail_limit = min(
+            max(int(settings.fetcher_config.get("DETAIL_LIMIT_PER_KEYWORD", 5)), 1),
+            20,
+        )
+    except (TypeError, ValueError):
+        detail_limit = 5
+    candidates = store.detail_candidates(limit_per_source=detail_limit)
+    reanalysis_candidates = store.analysis_candidates(limit=10)
+
+    try:
+        interval_min = max(
+            float(settings.fetcher_config.get("DETAIL_INTERVAL_MIN_SECONDS", 0)),
+            0.0,
+        )
+        interval_max = max(
+            float(settings.fetcher_config.get("DETAIL_INTERVAL_MAX_SECONDS", 0)),
+            interval_min,
+        )
+    except (TypeError, ValueError):
+        interval_min, interval_max = 0.0, 0.0
+
+    detailed: list[dict[str, Any]] = []
+    fetch_detail = getattr(fetcher, "fetch_detail", None)
+    for index, candidate in enumerate(candidates):
+        try:
+            if callable(fetch_detail):
+                detail = fetch_detail(candidate["url"])
+            else:
+                detail = {
+                    "title": candidate["title"],
+                    "content": candidate["title"],
+                    "detail_status": "success",
+                }
+            detailed.append({**candidate, **detail})
+        except (XiaohongshuRiskControlError, XiaohongshuSessionError):
+            store.update_note_intelligence(
+                candidate["note_key"],
+                detail={"detail_status": "failed"},
+            )
+            break
+        except Exception:
+            store.update_note_intelligence(
+                candidate["note_key"],
+                detail={"detail_status": "failed"},
+            )
+        if index < len(candidates) - 1 and interval_max > 0:
+            sleep_func(random.uniform(interval_min, interval_max))
+
+    analyses = analyzer(detailed) if detailed else {}
+    for item in detailed:
+        store.update_note_intelligence(
+            item["note_key"],
+            detail=item,
+            analysis=analyses.get(item["note_key"]),
+        )
+    result["enriched_items"] = len(detailed)
+    result["relevant_items"] = sum(
+        1
+        for item in detailed
+        if analyses.get(item["note_key"], {}).get("relevant") is True
+    )
+    reanalyses = analyzer(reanalysis_candidates) if reanalysis_candidates else {}
+    for item in reanalysis_candidates:
+        store.update_note_intelligence(
+            item["note_key"],
+            detail=item,
+            analysis=reanalyses.get(item["note_key"]),
+        )
+    result["reanalyzed_items"] = len(reanalysis_candidates)
+    return result
 
 
 def build_handler(
@@ -302,7 +388,10 @@ def collection_worker(
             print(
                 "[xhs-monitor] collection complete; "
                 f"status={result['status']} sources={result['source_count']} "
-                f"items={result['item_count']}",
+                f"items={result['item_count']} "
+                f"enriched={result.get('enriched_items', 0)} "
+                f"relevant={result.get('relevant_items', 0)} "
+                f"reanalyzed={result.get('reanalyzed_items', 0)}",
                 flush=True,
             )
             next_run = monotonic_func() + current_settings.interval_seconds

@@ -125,9 +125,12 @@ class XiaohongshuMonitorTests(unittest.TestCase):
         self.assertEqual(summary["source_count"], 2)
         self.assertEqual(summary["successful_sources"], 1)
         self.assertEqual(summary["failed_sources"], 1)
-        self.assertEqual(summary["recent_count"], 2)
+        self.assertEqual(summary["candidate_count"], 2)
+        self.assertEqual(summary["pending_detail_count"], 1)
+        self.assertEqual(summary["recent_count"], 1)
         self.assertEqual(summary["items"][0]["title"], "宠物进客舱被拒载案例")
-        self.assertEqual(summary["items"][1]["url"], "")
+        self.assertTrue(summary["items"][0]["summary"])
+        self.assertEqual(summary["items"][0]["summary_origin"], "deterministic")
         self.assertNotIn("COOKIE", str(summary))
         self.assertNotIn("not-exposed", str(summary))
 
@@ -139,7 +142,43 @@ class XiaohongshuMonitorTests(unittest.TestCase):
                 fetcher_factory=lambda _config: FakeFetcher(),
             )
 
-        self.assertEqual(self.store.summary()["recent_count"], 2)
+        summary = self.store.summary()
+        self.assertEqual(summary["candidate_count"], 2)
+        self.assertEqual(summary["recent_count"], 1)
+
+    def test_ai_analysis_filters_irrelevant_results_and_exposes_summary(self) -> None:
+        def analyzer(items):
+            return {
+                item["note_key"]: {
+                    "relevant": item["title"].startswith("宠物"),
+                    "topic": "拒载",
+                    "summary": "旅客反馈宠物办理客舱运输时遭到拒载。",
+                    "business_value": "需要核对航司客舱承运执行口径。",
+                    "relevance_reason": "涉及宠物客舱拒载",
+                    "summary_origin": "ai",
+                }
+                for item in items
+            }
+
+        result = collect_once(
+            self.settings,
+            self.store,
+            fetcher_factory=lambda _config: FakeFetcher(),
+            analyzer=analyzer,
+        )
+        summary = self.store.summary()
+
+        self.assertEqual(result["enriched_items"], 1)
+        self.assertEqual(result["relevant_items"], 1)
+        self.assertEqual(summary["recent_count"], 1)
+        self.assertEqual(
+            summary["items"][0]["summary"],
+            "旅客反馈宠物办理客舱运输时遭到拒载。",
+        )
+        self.assertEqual(
+            summary["items"][0]["business_value"],
+            "需要核对航司客舱承运执行口径。",
+        )
 
     def test_collector_failure_does_not_expose_exception(self) -> None:
         def failed_factory(_config):

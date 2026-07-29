@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 
 SPIDER_XHS_ROOT = (
@@ -196,6 +196,77 @@ class XiaohongshuFetcher:
         if not isinstance(items, list):
             raise XiaohongshuError("Spider_XHS 搜索响应缺少 data.items")
         return items[: self.limit]
+
+    def fetch_detail(self, url: str) -> Dict[str, Any]:
+        """读取一条搜索结果的正文和公开业务字段。"""
+
+        candidate = str(url or "").strip()
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError as exc:
+            raise XiaohongshuError("小红书笔记地址无效") from exc
+        hostname = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme not in {"http", "https"}
+            or (
+                hostname != "xiaohongshu.com"
+                and not hostname.endswith(".xiaohongshu.com")
+            )
+        ):
+            raise XiaohongshuError("小红书笔记地址无效")
+
+        proxies = None
+        if self.proxy_url:
+            proxies = {"http": self.proxy_url, "https": self.proxy_url}
+        with spider_xhs_runtime():
+            success, message, response = self.api.get_note_info(
+                candidate,
+                self.cookie,
+                proxies=proxies,
+            )
+        message = str(message or "")
+        if not success:
+            lowered = message.lower()
+            if any(marker in lowered for marker in SESSION_MESSAGE_MARKERS):
+                raise XiaohongshuSessionError(message or "小红书登录会话失效")
+            if any(marker in lowered for marker in RISK_MESSAGE_MARKERS):
+                raise XiaohongshuRiskControlError(message or "小红书请求被风控")
+            raise XiaohongshuError(message or "小红书笔记详情读取失败")
+
+        if not isinstance(response, dict):
+            raise XiaohongshuError("小红书笔记详情响应为空")
+        items = response.get("data", {}).get("items", [])
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+            raise XiaohongshuError("小红书笔记详情缺少 data.items")
+        note_card = items[0].get("note_card") or {}
+        if not isinstance(note_card, dict):
+            raise XiaohongshuError("小红书笔记详情缺少 note_card")
+        user = note_card.get("user") or {}
+        interact = note_card.get("interact_info") or {}
+        if not isinstance(user, dict):
+            user = {}
+        if not isinstance(interact, dict):
+            interact = {}
+        return {
+            "title": str(
+                note_card.get("title") or note_card.get("display_title") or ""
+            ).strip()[:300],
+            "content": str(note_card.get("desc") or "").strip()[:8000],
+            "author": str(
+                user.get("nickname") or user.get("nick_name") or ""
+            ).strip()[:100],
+            "ip_location": str(note_card.get("ip_location") or "").strip()[:100],
+            "liked_count": str(
+                interact.get("liked_count") or interact.get("like_count") or ""
+            ).strip()[:30],
+            "collected_count": str(
+                interact.get("collected_count")
+                or interact.get("collect_count")
+                or ""
+            ).strip()[:30],
+            "comment_count": str(interact.get("comment_count") or "").strip()[:30],
+            "detail_status": "success",
+        }
 
     def _load_keywords(self) -> List[XiaohongshuKeyword]:
         keywords: List[XiaohongshuKeyword] = []

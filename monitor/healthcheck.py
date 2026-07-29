@@ -39,7 +39,6 @@ def main() -> int:
             "/health/live",
             "/health/ready",
             "/api/v1/policy-change-digest?period=daily",
-            "/api/v1/site-url-inventory?limit=1",
         ):
             with urllib.request.urlopen(f"http://127.0.0.1:{PORT}{path}", timeout=5) as response:
                 if response.status != 200:

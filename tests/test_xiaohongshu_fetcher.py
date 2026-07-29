@@ -74,6 +74,51 @@ class XiaohongshuFetcherTests(unittest.TestCase):
         normalized = XiaohongshuFetcher._normalize_items(items)
         self.assertEqual(len(normalized), 1)
 
+    def test_note_detail_is_read_and_normalized(self):
+        api = Mock()
+        api.get_note_info.return_value = (
+            True,
+            "成功",
+            {
+                "data": {
+                    "items": [
+                        {
+                            "note_card": {
+                                "title": "宠物客舱运输经历",
+                                "desc": "旅客记录了宠物进入客舱时的材料和现场要求。",
+                                "ip_location": "上海",
+                                "user": {"nickname": "测试用户"},
+                                "interact_info": {
+                                    "liked_count": "12",
+                                    "collected_count": "3",
+                                    "comment_count": "4",
+                                },
+                            }
+                        }
+                    ]
+                }
+            },
+        )
+        fetcher = XiaohongshuFetcher(make_config(), api_client=api)
+
+        detail = fetcher.fetch_detail(
+            "https://www.xiaohongshu.com/explore/note1234"
+            "?xsec_token=token&xsec_source=pc_search"
+        )
+
+        self.assertEqual(detail["title"], "宠物客舱运输经历")
+        self.assertIn("现场要求", detail["content"])
+        self.assertEqual(detail["author"], "测试用户")
+        self.assertEqual(detail["liked_count"], "12")
+        self.assertEqual(detail["detail_status"], "success")
+        api.get_note_info.assert_called_once()
+
+    def test_note_detail_rejects_non_xiaohongshu_url(self):
+        fetcher = XiaohongshuFetcher(make_config(), api_client=Mock())
+
+        with self.assertRaises(Exception):
+            fetcher.fetch_detail("https://example.com/collect")
+
     def test_risk_response_opens_circuit_breaker(self):
         api = Mock()
         api.search_note.return_value = (False, "访问频繁，请完成验证", None)

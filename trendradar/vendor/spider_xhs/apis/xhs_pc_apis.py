@@ -525,7 +525,8 @@ class XHS_Apis():
             headers["x-rap-param"] = generate_x_rap_param(api, data)
             response = requests.post(self.base_url + api, headers=headers, data=data.encode('utf-8'), cookies=cookies, proxies=proxies, timeout=REQUEST_TIMEOUT)
             res_json = response.json()
-            success, msg = res_json["success"], res_json["msg"]
+            success = bool(res_json.get("success"))
+            msg = str(res_json.get("msg") or "")
         except Exception as e:
             success = False
             msg = _log_api_error(e)

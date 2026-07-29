@@ -30,5 +30,7 @@ def _load_fetcher_module() -> ModuleType:
 
 _FETCHER_MODULE = _load_fetcher_module()
 XiaohongshuFetcher = _FETCHER_MODULE.XiaohongshuFetcher
+XiaohongshuRiskControlError = _FETCHER_MODULE.XiaohongshuRiskControlError
+XiaohongshuSessionError = _FETCHER_MODULE.XiaohongshuSessionError
 load_spider_xhs_login_api = _FETCHER_MODULE.load_spider_xhs_login_api
 spider_xhs_runtime = _FETCHER_MODULE.spider_xhs_runtime

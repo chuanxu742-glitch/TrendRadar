@@ -26,6 +26,9 @@ def unavailable_payload() -> dict[str, Any]:
         "updated_at": "",
         "today_count": 0,
         "recent_count": 0,
+        "candidate_count": 0,
+        "pending_detail_count": 0,
+        "filtered_count": 0,
         "items": [],
     }
 
@@ -131,6 +134,15 @@ def _normalize_payload(payload: Any, *, limit: int) -> dict[str, Any]:
                 "url": _safe_note_url(raw.get("url")),
                 "first_seen_at": str(raw.get("first_seen_at") or ""),
                 "last_seen_at": str(raw.get("last_seen_at") or ""),
+                "author": str(raw.get("author") or "")[:100],
+                "ip_location": str(raw.get("ip_location") or "")[:100],
+                "liked_count": str(raw.get("liked_count") or "")[:30],
+                "collected_count": str(raw.get("collected_count") or "")[:30],
+                "comment_count": str(raw.get("comment_count") or "")[:30],
+                "topic": str(raw.get("topic") or "")[:80],
+                "summary": str(raw.get("summary") or "")[:500],
+                "business_value": str(raw.get("business_value") or "")[:300],
+                "content_excerpt": str(raw.get("content_excerpt") or "")[:600],
             }
         )
 
@@ -143,6 +155,9 @@ def _normalize_payload(payload: Any, *, limit: int) -> dict[str, Any]:
         "updated_at": str(payload.get("updated_at") or ""),
         "today_count": _integer(payload.get("today_count")),
         "recent_count": len(items),
+        "candidate_count": _integer(payload.get("candidate_count")),
+        "pending_detail_count": _integer(payload.get("pending_detail_count")),
+        "filtered_count": _integer(payload.get("filtered_count")),
         "items": items,
     }
 

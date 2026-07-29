@@ -2,12 +2,15 @@ xiaohongshu:
   enabled: true
   cookie_file: "/app/state/xhs_cookie.txt"
   limit_per_keyword: 20
+  detail_limit_per_keyword: 5
   sort: "latest"
   note_type: "all"
   note_time: "day"
   request_interval_seconds:
     min: 15
     max: 30
+    detail_min: 3
+    detail_max: 6
   keywords:
     - id: "service-dog-cabin-refused"
       query: "服务犬进客舱被拒载"

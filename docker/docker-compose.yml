@@ -23,6 +23,11 @@ services:
       - XHS_MONITOR_DATABASE=/app/state/xhs-monitor.db
       - XHS_MONITOR_SETTINGS=/app/state/settings.json
       - XHS_MONITOR_PORT=8091
+      - XHS_AI_SUMMARY_ENABLED=${XHS_AI_SUMMARY_ENABLED:-true}
+      - XHS_AI_TIMEOUT=${XHS_AI_TIMEOUT:-60}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-deepseek/deepseek-v4-flash}
+      - AI_API_BASE=${AI_API_BASE:-}
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health/live', timeout=3).read()"]

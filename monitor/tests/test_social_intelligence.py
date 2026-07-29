@@ -46,6 +46,10 @@ class XiaohongshuIntelligenceClientTests(unittest.TestCase):
                     "url": "https://www.xiaohongshu.com/explore/note1234",
                     "first_seen_at": "2026-07-28T18:00:00+08:00",
                     "last_seen_at": "2026-07-28T18:00:00+08:00",
+                    "author": "客户 A",
+                    "summary": "客户在机场办理时被告知宠物无法进入客舱。",
+                    "business_value": "需核实航司现场执行条件。",
+                    "content_excerpt": "办理当天，工作人员说明当前机型不接受宠物。",
                 },
                 {
                     "source_id": "xhs-pet",
@@ -71,6 +75,11 @@ class XiaohongshuIntelligenceClientTests(unittest.TestCase):
         self.assertEqual(result["status_label"], "今日已更新")
         self.assertEqual(result["recent_count"], 2)
         self.assertEqual(result["items"][1]["url"], "")
+        self.assertEqual(
+            result["items"][0]["summary"],
+            "客户在机场办理时被告知宠物无法进入客舱。",
+        )
+        self.assertEqual(result["items"][0]["author"], "客户 A")
         request = mocked.call_args.args[0]
         self.assertIn("limit=20", request.full_url)
 
