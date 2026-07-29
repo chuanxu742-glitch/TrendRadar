@@ -30,7 +30,9 @@ trendradar-mcp = "mcp_server.server:run_server"
 trendradar-xhs-login = "trendradar.crawler.xiaohongshu_login:main"
 
 [dependency-groups]
-dev = []
+dev = [
+    "pytest>=9.1.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -38,3 +40,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["trendradar", "mcp_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "monitor/tests"]
+pythonpath = ["."]
+addopts = "--import-mode=importlib"
